@@ -207,12 +207,12 @@ def subject_field(b: FormBuilder, f: dict) -> dict:
     if f.get("prefilled"):
         out["defaultValue"] = f["prefilled"]
     nl = norm(lab)
-    if ftype == "TEXT_FIELD":     # walidatory z treści etykiety
+    if ftype == "TEXT_FIELD":     # walidatory z treści etykiety (najwyżej jeden walidator formatu)
         for rx, v in ((r"epuap", "EPUAP"), (r"e-?doreczen", "ADE"), (r"dowod(u)? osobist|seria i numer dowodu",
                                                                        "SERIAL_NUMBER_ID_CARD"),
-                      (r"pesel", "PESEL"), (r"nip", "NIP"), (r"regon", "REGON"),
+                      (r"\bpesel\b", "PESEL"), (r"\bnip\b", "NIP"), (r"\bregon\b", "REGON"),
                       (r"e-?mail", "EMAIL"), (r"kod pocztowy", "ZIP_CODE")):
-            if re.search(rx, nl) and v not in out["validation"]:
+            if re.search(rx, nl) and not set(out["validation"]) - {"REQUIRED"}:
                 out["validation"].append(v)
     return out
 

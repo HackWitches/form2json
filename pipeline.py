@@ -15,6 +15,7 @@ from .typing_rules import SIMPLE_TYPE, infer_type, norm
 PUNCT_RE = re.compile(r"^[\s\W\d]*$")
 
 MULTI_RE = re.compile(r"mozna zaznaczyc (kilka|wiele)|wielokrotn|zaznacz wszystkie|kilka odpowiedzi")
+TITLE_RE = re.compile(r"^(wniosek|deklaracja|zgloszenie|oswiadczenie|zawiadomienie|informacja)\b")
 
 
 def strip_numbering(s: str) -> str:
@@ -26,11 +27,20 @@ def strip_numbering(s: str) -> str:
 def guess_title(doc: Document, dets: list[FormDetector]) -> str:
     if dets and dets[0].words:
         d = dets[0]
-        top = [Phrase(ln) for ln in d.lines if ln[0].box.cy < 0.45 * d.page.width * 1.414]
+        top = [Phrase(ln) for ln in d.lines if ln[0].box.cy < 0.45 * d.page.height]
+        for i, p in enumerate(top):
+            if TITLE_RE.match(norm(p.text)):
+                t = p.text
+                for q in top[i + 1:i + 3]:   # tytuł złamany na 2-3 linie: "WNIOSEK" / "o" / "wynajęcie świetlicy"
+                    if len(t.split()) >= 4:
+                        break
+                    t = f"{t} {q.text}"
+                return t.capitalize() if p.text.isupper() else t
         top = [p for p in top if len(p.text) > 8 and not NUMBERING_RE.match(p.text)]
         if top:
+            body = float(np.median([w.size or w.box.h for w in d.words]))   # ta sama miara co Phrase.size
             best = max(top, key=lambda p: (p.size, p.bold))
-            if best.size > 1.2 * d.line_h:
+            if best.size > 1.2 * body:
                 return best.text
     return Path(doc.path).stem
 
@@ -99,7 +109,9 @@ def merge_continuations(fields: list[FieldCandidate], line_h_by_page: dict[int, 
     for f in fields:
         p = out[-1] if out else None
         lh = line_h_by_page.get(f.page, 20)
-        if p and p.page == f.page and p.label == f.label and p.detector in ("dots", "underline")                 and f.detector in ("dots", "underline") and 0 <= f.bbox[1] - p.bbox[3] < 2.5 * lh                 and f.bbox[0] <= p.bbox[0] + 5:
+        if p and p.page == f.page and p.label == f.label and p.detector in ("dots", "underline") \
+                and f.detector in ("dots", "underline") and 0 <= f.bbox[1] - p.bbox[3] < 2.5 * lh \
+                and f.bbox[0] <= p.bbox[0] + 5:
             p.bbox = [min(p.bbox[0], f.bbox[0]), p.bbox[1], max(p.bbox[2], f.bbox[2]), f.bbox[3]]
             if p.type == "string":
                 p.type = "textarea"
@@ -158,8 +170,7 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
 
     if vlm is not None:
         vtitle, fields, vlm_addr = vlm.refine(doc.pages, fields, doc.native_text, title)
-        good = re.compile(r"^(wniosek|deklaracja|zgloszenie|oswiadczenie|zawiadomienie|informacja)")
-        if good.match(norm(vtitle)) and not good.match(norm(title)):
+        if TITLE_RE.match(norm(vtitle)) and not TITLE_RE.match(norm(title)):
             title = vtitle
         addressee = addressee or vlm_addr
         used_vlm = True

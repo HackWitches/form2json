@@ -159,7 +159,7 @@ def detect_entities(fields: list[FieldCandidate], text: str) -> dict:
 ADDRESSEE_RE = re.compile(r"(?<![\w])(Burmistrz|Wójt|WÓJT|BURMISTRZ|Prezydent|PREZYDENT|Starosta|STAROSTA|"
                           r"Marszałek|Urząd|URZĄD|Zarząd|Dyrektor|Komendant|Kierownik|Naczelnik|Rada|RADA)"
                           r"(?![\wąćęłńóśźż])(.*)$")
-ADDR_LINE = re.compile(r"\d|ul\.|al\.|^\s*$|wnios|deklarac|zarzadz|regulamin|instrukcj")
+ADDR_LINE = re.compile(r"\d|\bul\.|\bal\.|^\s*$|wnios|deklarac|zarzadz|regulamin|instrukcj")
 
 
 def _tc(s: str) -> str:
@@ -178,7 +178,8 @@ def find_addressee(lines: list[str]) -> str:
             continue
         # nazwa organu bywa w 2 liniach: "Urząd Gminy" / "Ulan-Majorat", "Urząd Miejski Wrocławia" / "Wydział ..."
         nxt = lines[i + 1].strip(" .:,") if i + 1 < len(lines) else ""
-        if nxt and len(s) < 45 and len(nxt) < 45 and not ADDR_LINE.search(norm(nxt))                 and not re.search(r"[.…(/]", nxt) and nxt[:1].isupper():
+        if nxt and len(s) < 45 and len(nxt) < 45 and not ADDR_LINE.search(norm(nxt)) \
+                and not re.search(r"[.…(/]", nxt) and nxt[:1].isupper():
             s = f"{s}, {nxt}" if norm(nxt).startswith("wydzial") else f"{s} {nxt}"
         return _tc(s)
     return ""
