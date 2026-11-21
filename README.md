@@ -108,3 +108,21 @@ Konfiguracja VLM: `config/local.toml` (model, adres Ollamy, rozmiar obrazu, kont
 | `build.py` | FormDefinition zgodny ze standardem i regułami |
 | `validate.py` | walidacja schematu i reguł |
 | `compare.py`, `show.py` | ocena względem referencji, podgląd |
+
+## Wyniki na materiałach konkursowych (RTX 4090, qwen3-vl:8b-instruct)
+
+* 9 formularzy × wszystkie dostępne formaty = **69 plików, 69/69 FormDefinition bez błędów walidacji**
+  (schemat JSON + reguły techniczne). Pełna tabela: `wyniki/RAPORT.md`.
+* Porównanie z plikami referencyjnymi (`python -m form2json.compare`):
+
+| formularz | recall (cały formularz) | recall: przedmiot wniosku | zgodność typów |
+|---|---|---|---|
+| Wniosek o ustalenie numeru porządkowego nieruchomości | 91% | 100% | 98% |
+| Wniosek o stwierdzenie nadpłaty podatku | 84% | 71% | 98% |
+
+  Wynik jest jednakowy dla PDF / DOC / DOCX / ODS / XLSX / JPG / PNG tego samego formularza.
+* Czas: ~10–20 s na stronę (LibreOffice + OCR + VLM). Bez GPU (`--no-vlm`) kilka sekund na plik,
+  ale z gorszymi etykietami pól („w kwocie” zamiast „Kwota nadpłaty”).
+* Zabezpieczenia: wysokie skany (kilka stron w jednym obrazie) są dzielone na strony A4; ucięty JSON z
+  modelu jest odzyskiwany do ostatniego pełnego pola; powtórzenia pól z „pętli” modelu są usuwane;
+  role z VLM są weryfikowane regułami (np. „Termin wynajęcia od” nie jest datą złożenia wniosku).

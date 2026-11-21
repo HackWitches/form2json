@@ -157,6 +157,26 @@ def load_config(path: str | Path | None = None) -> dict:
     return cfg
 
 
+def parse_partial(txt: str) -> dict:
+    """JSON z modelu bywa ucięty (limit tokenów przy dużych tabelach) - zachowaj kompletne pola."""
+    try:
+        return json.loads(txt)
+    except json.JSONDecodeError:
+        pass
+    i = txt.rfind("}")
+    while i > 0:
+        for tail in ("]}", "]}]}", "}]}"):
+            try:
+                d = json.loads(txt[:i + 1] + tail)
+                if isinstance(d, dict) and isinstance(d.get("fields"), list):
+                    print(f"  [VLM] odpowiedź ucięta - odzyskano {len(d['fields'])} pól", file=sys.stderr)
+                    return d
+            except json.JSONDecodeError:
+                continue
+        i = txt.rfind("}", 0, i)
+    raise ValueError("niepoprawny JSON z modelu")
+
+
 class VLMRefiner:
     def __init__(self, config: dict | None = None, **overrides):
         cfg = dict(config or load_config())
@@ -195,7 +215,8 @@ class VLMRefiner:
                               headers={"Authorization": f"Bearer {self.key}"}, verify=self.verify)
             r.raise_for_status()
             txt = r.json()["choices"][0]["message"]["content"]
-        return json.loads(txt)
+        return parse_partial(txt)
+
 
     def available(self) -> bool:
         try:
@@ -249,7 +270,14 @@ class VLMRefiner:
     @staticmethod
     def _bind(fields: list[dict], cands: list[FieldCandidate], page: int) -> list[FieldCandidate]:
         res = []
+        seen: set = set()
         for f in fields:
+            # małe modele wpadają w pętle powtórzeń przy długich tabelach - identyczne pola usuwamy
+            key = (str(f.get("label", "")).lower().strip(), f.get("type"), str(f.get("section", "")).lower(),
+                   tuple(f.get("options") or []))
+            if key in seen:
+                continue
+            seen.add(key)
             lab = (f.get("label") or "").strip(" .:…")
             if not lab:
                 continue

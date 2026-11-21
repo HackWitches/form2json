@@ -65,6 +65,20 @@ def assign_roles(fields: list[FieldCandidate]) -> list[FieldCandidate]:
                 f.role = "subject"     # np. "Miejscowość" w sekcji "Dane nieruchomości"
             elif f.role not in ROLES_OK:
                 f.role = ""
+            # role, których pola są pomijane lub zastępowane sekcją standardową, muszą mieć potwierdzenie w etykiecie
+            elif f.role == "place_date" and not (PLACE_DATE_RE.search(lab.strip(" .:"))
+                                                 or re.fullmatch(r"(miejscowosc|miejsce)?\W*(i\s+)?data\W*", lab)):
+                f.role = "subject"     # np. "Termin wynajęcia od" to nie data złożenia wniosku
+            elif f.role == "applicant_name" and (not NAME_RE.search(lab) or
+                                                 re.search(r"\bosob[ayie]\b|odpowiedzialn|kontaktow", lab)
+                                                 and "wnioskodaw" not in lab):
+                f.role = "subject"
+            elif f.role == "applicant_id" and not ID_RE.search(lab):
+                f.role = "subject"
+            elif f.role == "office_use" and not (OFFICE_RE.search(lab) or OFFICE_RE.search(sec)):
+                f.role = ""
+            elif f.role == "signature":
+                f.role = "place_date" if re.search(r"\bdata\b|miejscowosc", lab) else ""
             if f.role:
                 if f.role == "applicant_address":
                     seen_addr_sec.add(sec)

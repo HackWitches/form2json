@@ -210,13 +210,31 @@ def deskew(img: np.ndarray) -> np.ndarray:
     return cv2.warpAffine(img, m, (w, h), flags=cv2.INTER_CUBIC, borderValue=(255, 255, 255))
 
 
+def split_pages(img: np.ndarray) -> list[np.ndarray]:
+    """Obraz z kilkoma stronami sklejonymi w pionie -> strony A4 (cięcie w najjaśniejszym wierszu)."""
+    h, w = img.shape[:2]
+    step = int(round(w * 1.414))
+    if h <= step * 1.3:
+        return [img]
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    ink = (gray < 200).sum(axis=1)
+    cuts, y = [0], 0
+    while h - y > step * 1.3:
+        lo, hi = y + int(step * 0.9), min(h - 1, y + int(step * 1.1))
+        c = lo + int(np.argmin(ink[lo:hi]))
+        cuts.append(c)
+        y = c
+    cuts.append(h)
+    return [img[a:b] for a, b in zip(cuts, cuts[1:]) if b - a > 50]
+
+
 def load_image(path: Path, ocr) -> list[Page]:
     img = deskew(imread_unicode(path))
     # Szacujemy DPI zakładając szerokość A4 (8.27 cala) - tylko do progów geometrii.
     dpi = max(72, int(round(img.shape[1] / 8.27)))
     if ocr is None:
         raise RuntimeError("Obraz wymaga OCR - podaj --ocr paddle|tesseract|doctr")
-    return [Page(0, img, dpi, ocr(img), f"ocr:{ocr.name}")]
+    return [Page(i, p, dpi, ocr(p), f"ocr:{ocr.name}") for i, p in enumerate(split_pages(img))]
 
 
 # ---------------------------------------------------------------- wejście
