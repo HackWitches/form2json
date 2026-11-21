@@ -18,6 +18,7 @@ obligatoryjnością i zależnościami (warunki SHOW). Bez GPU pipeline działa b
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
 import sys
@@ -25,8 +26,10 @@ import time
 import tomllib
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.parse import urlparse
 
 import cv2
+import jsonschema
 import numpy as np
 import requests
 
@@ -124,7 +127,10 @@ def _tiles(img: np.ndarray) -> list[np.ndarray]:
     step = int(w * 1.414)
     if h <= step * 1.15:
         return [img]
-    return [img[y:min(h, y + step + int(0.05 * step))] for y in range(0, h, step)]
+    ys = list(range(0, h, step))
+    if h - ys[-1] < 0.3 * step:      # ostatni skrawek (np. 28 px) dolicz do poprzedniego kafelka
+        ys.pop()
+    return [img[y:h if y == ys[-1] else min(h, y + step + int(0.05 * step))] for y in ys]
 
 
 DEFAULT_CONFIG = Path(__file__).with_name("config") / "local.toml"
@@ -157,6 +163,18 @@ def load_config(path: str | Path | None = None) -> dict:
     return cfg
 
 
+def _is_local(url: str) -> bool:
+    """Wymaganie projektu: tylko lokalne modele - adres VLM musi być pętlą zwrotną lub siecią prywatną."""
+    host = urlparse(url).hostname or ""
+    if host == "localhost":
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return False
+    return ip.is_loopback or ip.is_private
+
+
 def parse_partial(txt: str) -> dict:
     """JSON z modelu bywa ucięty (limit tokenów przy dużych tabelach) - zachowaj kompletne pola."""
     try:
@@ -187,6 +205,9 @@ class VLMRefiner:
         self.model = cfg["model"]
         self.key = cfg.get("api_key", "EMPTY")
         self.verify = cfg["ca_bundle"] or bool(cfg["verify_tls"])
+        self.raw: list[dict] = []
+        if not _is_local(self.base) and not cfg.get("allow_remote"):
+            raise ValueError(f"VLM {self.base} nie jest adresem lokalnym (ustaw allow_remote = true, jeśli to celowe)")
 
     # ------------------------------------------------------------ transport
     def _chat(self, images: list[np.ndarray], text: str) -> dict:
@@ -215,7 +236,9 @@ class VLMRefiner:
                               headers={"Authorization": f"Bearer {self.key}"}, verify=self.verify)
             r.raise_for_status()
             txt = r.json()["choices"][0]["message"]["content"]
-        return parse_partial(txt)
+        out = parse_partial(txt)
+        jsonschema.validate(out, SCHEMA)     # serwer mógł nie wymusić schematu; błąd -> wynik geometrii dla strony
+        return out
 
 
     def available(self) -> bool:
@@ -231,10 +254,11 @@ class VLMRefiner:
                title_guess: str) -> tuple[str, list[FieldCandidate], str]:
         """Zapytanie per strona (mniejsze modele lepiej radzą sobie z jedną stroną)."""
         res: list[FieldCandidate] = []
-        self.raw: list[dict] = []          # surowe odpowiedzi modelu (zapisywane w *.fields.json)
+        self.raw = []                      # surowe odpowiedzi modelu (zapisywane w *.fields.json)
         title, addressee = title_guess, ""
         for page in pages:
             pc = [c for c in cands if c.page == page.index]
+            page_res: list[FieldCandidate] | None = []
             page_text = " ".join(w.text for w in page.words)[:6000]
             for ti, tile in enumerate(_tiles(page.image)):
                 if self.cfg.get("use_candidates"):
@@ -254,17 +278,18 @@ class VLMRefiner:
                 t0 = time.time()
                 try:
                     out = self._chat([tile], prompt)
-                except Exception as e:  # VLM jest opcjonalny - w razie błędu zostają kandydaci z geometrii
+                except Exception as e:  # VLM jest opcjonalny - w razie błędu cała strona z geometrii
                     print(f"  [VLM] strona {page.index + 1}: błąd {e} - używam wyniku geometrii", file=sys.stderr)
-                    res.extend(pc)
-                    continue
+                    page_res = None
+                    break
                 print(f"  [VLM] strona {page.index + 1}.{ti + 1}: {len(out.get('fields', []))} pól, "
                       f"{time.time() - t0:.1f}s", file=sys.stderr)
                 self.raw.append({"page": page.index, "tile": ti, "response": out})
                 if page.index == 0 and ti == 0:
                     title = out.get("title") or title
                     addressee = out.get("addressee") or ""
-                res.extend(self._bind(out.get("fields", []), pc, page.index))
+                page_res.extend(self._bind(out.get("fields", []), pc, page.index))
+            res.extend(pc if page_res is None else page_res)
         return title, res, addressee
 
     @staticmethod
