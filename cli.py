@@ -8,6 +8,7 @@ Dla każdego pliku zapisuje:
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import sys
 import traceback
@@ -23,12 +24,12 @@ SUPPORTED = IMAGE_EXT | OFFICE_EXT | {".pdf"}
 def iter_inputs(paths: list[str], exclude: Path | None = None):
     ex = exclude.resolve() if exclude else None
     for p in map(Path, paths):
-        if p.is_dir():
+        if p.is_dir():           # wykluczenia tylko wewnątrz podanego katalogu, nie w jego przodkach
             yield from sorted(q for q in p.rglob("*") if q.suffix.lower() in SUPPORTED
                               and not (ex and ex in q.resolve().parents)
                               and "wizualizacja" not in q.name.lower()      # gotowe wizualizacje, nie formularze
                               and not any(x.name in ("form2json", ".venv") or x.name.startswith("wyniki")
-                                          for x in q.parents))
+                                          for x in q.relative_to(p).parents))
         elif p.suffix.lower() in SUPPORTED:
             yield p
 
@@ -56,6 +57,12 @@ def draw_debug(path: Path, generic: dict, out: Path, dpi: int, ocr) -> None:
         buf.tofile(str(out.with_name(out.name.replace(".debug.png", f".p{p.index + 1}.debug.png"))))
 
 
+def _dpi(v: str) -> int:
+    if not 72 <= int(v) <= 600:
+        raise argparse.ArgumentTypeError("dpi musi być w zakresie 72-600")
+    return int(v)
+
+
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="form2json")
     ap.add_argument("inputs", nargs="+")
@@ -67,7 +74,7 @@ def main(argv=None) -> int:
     ap.add_argument("--rebuild", action="store_true", help="wejście: *.fields.json - przebuduj tylko *.form.json")
     ap.add_argument("--config", default=None, help="plik konfiguracji VLM (domyślnie config/local.toml)")
     ap.add_argument("--tabs", default="auto", choices=["auto", "single"])
-    ap.add_argument("--dpi", type=int, default=150)
+    ap.add_argument("--dpi", type=_dpi, default=150)
     ap.add_argument("--debug", action="store_true")
     a = ap.parse_args(argv)
     if a.rebuild:
@@ -92,10 +99,19 @@ def main(argv=None) -> int:
     out.mkdir(parents=True, exist_ok=True)
     rc = 0
     # --rebuild: tylko ponowne zbudowanie *.form.json z istniejących *.fields.json (bez OCR/VLM)
-    inputs = sorted(Path(x) for pat in a.inputs for x in (Path().glob(pat) if "*" in pat else [pat])) \
-        if a.rebuild else iter_inputs(a.inputs, out)
+    inputs = sorted(Path(x) for pat in a.inputs for x in (glob.glob(pat) if glob.has_magic(pat) else [pat])) \
+        if a.rebuild else list(iter_inputs(a.inputs, out))
+    if not inputs:
+        print("Brak plików wejściowych o obsługiwanych rozszerzeniach", file=sys.stderr)
+        return 2
+    seen: dict[str, Path] = {}
     for p in inputs:
         name = p.name.removesuffix(".fields.json") if a.rebuild else p.name
+        if name in seen:          # ta sama nazwa w dwóch katalogach nadpisałaby wyniki
+            print(f"[ERR] {p}: nazwa wyniku koliduje z {seen[name]} - pomijam", file=sys.stderr)
+            rc = 1
+            continue
+        seen[name] = p
         try:
             if a.rebuild:
                 from .pipeline import reanalyze

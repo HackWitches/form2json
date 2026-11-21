@@ -133,6 +133,9 @@ def reanalyze(g: dict) -> dict:
     from dataclasses import fields as dc_fields
     names = {x.name for x in dc_fields(FieldCandidate)}
     fs = [FieldCandidate(**{k: v for k, v in f.items() if k in names}) for f in g["fields"]]
+    for f in fs:          # rolę i obligatoryjność z reguł liczymy od nowa; z VLM zostają (jak w extract)
+        if "vlm" not in f.detector:
+            f.role, f.required = "", None
     assign_roles(fs)
     assign_dependencies(fs)
     assign_required(fs)
