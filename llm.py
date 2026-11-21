@@ -21,6 +21,7 @@ import base64
 import json
 import os
 import sys
+import threading
 import time
 import tomllib
 from difflib import SequenceMatcher
@@ -150,6 +151,7 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg.setdefault("max_image_side", 1600)
     cfg.setdefault("num_ctx", 16384)
     cfg.setdefault("use_candidates", False)
+    cfg.setdefault("parallel", 1)          # ile stron naraz wysyłać do VLM
     cfg["backend"] = os.environ.get("FORM2JSON_VLM_BACKEND", cfg["backend"])
     cfg["base_url"] = os.environ.get("FORM2JSON_VLM_URL", cfg["base_url"])
     cfg["model"] = os.environ.get("FORM2JSON_VLM_MODEL", cfg["model"])
@@ -226,13 +228,22 @@ class VLMRefiner:
         except Exception:
             return False
 
+    _tls = threading.local()
+
+    @property
+    def raw(self) -> list[dict]:
+        """Surowe odpowiedzi modelu z ostatniego refine() w bieżącym wątku."""
+        return getattr(self._tls, "raw", [])
+
     # ------------------------------------------------------------ refine
     def refine(self, pages, cands: list[FieldCandidate], native_text: str,
                title_guess: str) -> tuple[str, list[FieldCandidate], str]:
         """Zapytanie per strona (mniejsze modele lepiej radzą sobie z jedną stroną)."""
         res: list[FieldCandidate] = []
-        self.raw: list[dict] = []          # surowe odpowiedzi modelu (zapisywane w *.fields.json)
+        raw: list[dict] = []               # surowe odpowiedzi modelu (zapisywane w *.fields.json)
+        self._tls.raw = raw                # osobno dla każdego wątku (kilka plików naraz)
         title, addressee = title_guess, ""
+        jobs = []                          # (strona, nr fragmentu, obraz, kandydaci, prompt)
         for page in pages:
             pc = [c for c in cands if c.page == page.index]
             page_text = " ".join(w.text for w in page.words)[:6000]
@@ -251,20 +262,38 @@ class VLMRefiner:
                 prompt = (f"Tytuł formularza (wstępnie): {title_guess}\nStrona {page.index + 1}.\n\n" + hint
                           + (f"Tekst strony (warstwa tekstowa/OCR, pomocniczo):\n{page_text}\n\n" if page_text else "")
                           + "Zwróć kompletną listę pól tej strony w zadanym schemacie JSON.")
-                t0 = time.time()
-                try:
-                    out = self._chat([tile], prompt)
-                except Exception as e:  # VLM jest opcjonalny - w razie błędu zostają kandydaci z geometrii
-                    print(f"  [VLM] strona {page.index + 1}: błąd {e} - używam wyniku geometrii", file=sys.stderr)
-                    res.extend(pc)
-                    continue
-                print(f"  [VLM] strona {page.index + 1}.{ti + 1}: {len(out.get('fields', []))} pól, "
-                      f"{time.time() - t0:.1f}s", file=sys.stderr)
-                self.raw.append({"page": page.index, "tile": ti, "response": out})
-                if page.index == 0 and ti == 0:
-                    title = out.get("title") or title
-                    addressee = out.get("addressee") or ""
-                res.extend(self._bind(out.get("fields", []), pc, page.index))
+                jobs.append((page.index, ti, tile, pc, prompt))
+
+        def ask(job):
+            pi, ti, tile, _, prompt = job
+            t0 = time.time()
+            try:
+                out = self._chat([tile], prompt)
+            except Exception as e:  # VLM jest opcjonalny - w razie błędu zostają kandydaci z geometrii
+                print(f"  [VLM] strona {pi + 1}: błąd {e} - używam wyniku geometrii", file=sys.stderr)
+                return None
+            print(f"  [VLM] strona {pi + 1}.{ti + 1}: {len(out.get('fields', []))} pól, "
+                  f"{time.time() - t0:.1f}s", file=sys.stderr)
+            return out
+
+        # kilka stron naraz: GPU przetwarza równoległe zapytania wsadowo (Ollama: OLLAMA_NUM_PARALLEL)
+        workers = max(1, int(self.cfg.get("parallel", 1)))
+        if workers > 1 and len(jobs) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                outs = list(ex.map(ask, jobs))
+        else:
+            outs = [ask(j) for j in jobs]
+        # wyniki składamy w kolejności stron - wiązanie z geometrią jest deterministyczne
+        for (pi, ti, _, pc, _), out in zip(jobs, outs):
+            if out is None:
+                res.extend(pc)
+                continue
+            raw.append({"page": pi, "tile": ti, "response": out})
+            if pi == 0 and ti == 0:
+                title = out.get("title") or title
+                addressee = out.get("addressee") or ""
+            res.extend(self._bind(out.get("fields", []), pc, pi))
         return title, res, addressee
 
     @staticmethod

@@ -84,6 +84,7 @@ python form2json\run.py --fast     # prostszy, szybszy model (profile = fast)
 | `[paths] input`, `output` | katalog lub pliki wejściowe (kilka rozdzielonych `;`), katalog wyników |
 | `[model] vlm_enabled` | `true` = VLM na GPU, `false` = tylko geometria + OCR (CPU) |
 | `[model] profile` | `default` (**qwen3-vl:8b-instruct**, model domyślny) / `fast` (qwen3-vl:4b-instruct) / `accurate` (qwen3-vl:30b-a3b-instruct) |
+| `[performance] file_workers`, `vlm_parallel`, `server_parallel` | pliki naraz, strony jednego pliku naraz do VLM, zapytania liczone jednocześnie przez serwer Ollama (1 = po kolei) |
 | `[processing] ocr`, `tabs`, `dpi`, `debug` | jak parametry `--ocr`, `--tabs`, `--dpi`, `--debug` |
 | `[report] enabled`, `ref_dir` | generowanie `RAPORT.md` w katalogu wyników i katalog z plikami `konfiguracja_form_*.json` |
 | `[timing] enabled` | czas pliku i czas łączny w linii `[OK]` + podsumowanie (pliki, strony, pola, czas łączny, średnio na plik i na stronę) |
@@ -91,6 +92,41 @@ python form2json\run.py --fast     # prostszy, szybszy model (profile = fast)
 Parametry z linii poleceń mają pierwszeństwo przed `runtime.config` (`--no-report`, `--no-timing`,
 `--profile`, `--vlm-model`, `--runtime-config inny.config`...). Jeśli model wybranego profilu nie jest pobrany
 w Ollamie, program wypisze polecenie `ollama pull` i użyje modelu domyślnego.
+
+### Przyspieszenie (RTX 4090, CUDA)
+
+Ollama już liczy model na GPU (CUDA, cały model w VRAM), ale domyślnie obsługuje jedno zapytanie naraz
+i bez flash attention. Przyspieszenie (~3× przy tej samej dokładności) działa tak samo na każdym systemie,
+bez ustawiania niczego w systemie:
+
+* **lokalnie (Windows / Linux / macOS)**: `[ollama] manage = auto` w `runtime.config` - form2json
+  (`ollama_server.py`) sam uruchamia `ollama serve` na porcie 11435 z `OLLAMA_FLASH_ATTENTION=1`
+  i `OLLAMA_NUM_PARALLEL=4`, w razie potrzeby pobiera model przez API i zamyka serwer po zakończeniu.
+  Wymaga tylko zainstalowanej Ollamy; modele są współdzielone z systemową Ollamą.
+* **Docker** (`deploy/docker-compose.yml`): kontener `ollama/ollama` na GPU z tymi samymi zmiennymi
+  + kontener form2json (LibreOffice, Tesseract `pol`). Na innym komputerze wystarczy Docker z obsługą GPU
+  NVIDIA (Linux: NVIDIA Container Toolkit, Windows: Docker Desktop + WSL2):
+
+```powershell
+cd form2json
+$env:INPUT_DIR = "C:\formularze"; $env:OUTPUT_DIR = "C:\wyniki"
+docker compose -f deploy/docker-compose.yml up --build --abort-on-container-exit form2json
+```
+
+Pierwsze uruchomienie w Dockerze pobiera model (~6 GB) do wolumenu `ollama`.
+`vlm_parallel` (strony naraz) i `file_workers` (pliki naraz) w `runtime.config` działają w obu trybach.
+
+Pomiar, 5 plików / 22 strony, w tym 2 z referencją:
+
+| ustawienie | czas | s/stronę | recall (śr.) |
+|---|---|---|---|
+| poprzednio (Ollama domyślnie, strony po kolei) | 143 s | 6,5 | 89% |
+| + `OLLAMA_FLASH_ATTENTION=1` | 99 s | 4,5 | 89% |
+| + `OLLAMA_NUM_PARALLEL=4`, `vlm_parallel = 4` | 70 s | 3,2 | 89% |
+| obraz strony 1280 px zamiast 1600 (odrzucone) | 59 s | 2,7 | 88%, ale recall przedmiotu wniosku spada do 43% na skanie JPG |
+
+4 pliki z `test-kilku-plikow` (36 stron): 3 min 56 s → 1 min 21 s (`file_workers = 2`), dokładność bez zmian.
+Bez zmiennych w Ollamie `vlm_parallel` nic nie psuje, ale też nie przyspiesza (zapytania czekają w kolejce).
 
 Pozostałe tryby:
 

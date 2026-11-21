@@ -1,0 +1,50 @@
+# form2json + Ollama na GPU NVIDIA - te same ustawienia przyspieszenia na każdym komputerze.
+# Wymagania: Docker z obsługą GPU (Linux: NVIDIA Container Toolkit; Windows: Docker Desktop + WSL2).
+#
+#   cd form2json
+#   $env:INPUT_DIR="C:\formularze"; $env:OUTPUT_DIR="C:\wyniki"     (Linux: export INPUT_DIR=... OUTPUT_DIR=...)
+#   docker compose -f deploy/docker-compose.yml up --build --abort-on-container-exit form2json
+#
+# Pierwsze uruchomienie pobiera model (~6 GB) do wolumenu ollama - kolejne już nie.
+name: form2json
+
+services:
+  ollama:
+    image: ollama/ollama:${OLLAMA_VERSION:-latest}
+    environment:
+      # te same wartości, które form2json ustawia lokalnie ([performance] i [ollama] w runtime.config)
+      OLLAMA_FLASH_ATTENTION: "1"
+      OLLAMA_NUM_PARALLEL: "${OLLAMA_NUM_PARALLEL:-4}"   # = server_parallel z runtime.config
+      OLLAMA_KEEP_ALIVE: "30m"
+    volumes:
+      - ollama:/root/.ollama
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD", "ollama", "list"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+
+  form2json:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    depends_on:
+      ollama:
+        condition: service_healthy
+    environment:
+      # adres nielokalny -> [ollama] manage = auto używa tego kontenera (nie uruchamia własnego serwera)
+      FORM2JSON_VLM_URL: "http://ollama:11434"
+    volumes:
+      - ${INPUT_DIR:-./in}:/data/in:ro
+      - ${OUTPUT_DIR:-./out}:/data/out
+    # dodatkowe parametry: docker compose ... run --rm form2json /data/in -o /data/out --no-report
+
+volumes:
+  ollama:

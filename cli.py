@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import threading
 import time
 import traceback
 from dataclasses import dataclass, field
@@ -30,6 +31,7 @@ from .pipeline import extract
 from .runtime import Runtime, load_runtime
 
 SUPPORTED = IMAGE_EXT | OFFICE_EXT | {".pdf"}
+_LOCK = threading.Lock()
 
 
 # ---------------------------------------------------------------- ustawienia
@@ -48,10 +50,13 @@ class Settings:
     model: str | None
     fallback_model: str | None
     vlm_config: str | None
+    vlm_parallel: int
+    file_workers: int
     report: bool
     ref_dir: str
     timing: bool
     runtime_source: str = ""
+    ollama: object = None           # OllamaSettings z runtime.config
 
 
 @dataclass
@@ -67,6 +72,13 @@ class FileResult:
 class RunStats:
     started: float = field(default_factory=time.perf_counter)
     results: list[FileResult] = field(default_factory=list)
+    finished: int = 0
+
+    def done(self) -> int:
+        """Numer kolejny ukończonego pliku (bezpieczne dla wątków)."""
+        with _LOCK:
+            self.finished += 1
+            return self.finished
 
     @property
     def elapsed(self) -> float:
@@ -89,6 +101,10 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--config", default=None, help="plik konfiguracji VLM (domyślnie config/local.toml)")
     ap.add_argument("--tabs", default=None, choices=["auto", "single"])
     ap.add_argument("--dpi", type=int, default=None)
+    ap.add_argument("--vlm-parallel", type=int, default=None, help="ile stron naraz do VLM")
+    ap.add_argument("--workers", type=int, default=None, help="ile plików przetwarzać naraz")
+    ap.add_argument("--ollama", choices=["auto", "always", "never"], default=None,
+                    help="własny serwer Ollama z przyspieszeniem (domyślnie [ollama] manage)")
     ap.add_argument("--debug", action="store_true")
     ap.add_argument("--report", action=argparse.BooleanOptionalAction, default=None,
                     help="generuj RAPORT.md (domyślnie [report] enabled)")
@@ -116,9 +132,18 @@ def resolve_settings(a: argparse.Namespace, rt: Runtime) -> Settings:
         ocr="none" if a.rebuild else (a.ocr or rt.ocr), tabs=a.tabs or rt.tabs, dpi=a.dpi or rt.dpi,
         debug=a.debug or rt.debug, rebuild=a.rebuild, use_vlm=use_vlm, force_vlm=a.vlm,
         model=model, fallback_model=rt.models["default"], vlm_config=a.config,
+        vlm_parallel=max(1, a.vlm_parallel or rt.vlm_parallel), file_workers=max(1, a.workers or rt.file_workers),
         report=bool(report),
         ref_dir=a.ref or rt.ref_dir or _first_dir(inputs),
-        timing=rt.timing if a.timing is None else a.timing, runtime_source=rt.source)
+        timing=rt.timing if a.timing is None else a.timing, runtime_source=rt.source,
+        ollama=_ollama_settings(a, rt))
+
+
+def _ollama_settings(a: argparse.Namespace, rt: Runtime):
+    o = rt.ollama
+    if a.ollama:
+        o.manage = a.ollama
+    return o
 
 
 def _first_dir(inputs: list[str]) -> str:
@@ -130,7 +155,9 @@ def print_settings(s: Settings) -> None:
     print(f"Konfiguracja: {s.runtime_source or 'domyślna (brak runtime.config)'}")
     print(f"  wejście: {'; '.join(s.inputs)}")
     print(f"  wyniki:  {s.out}")
-    print(f"  raport:  {'tak' if s.report else 'nie'}   pomiar czasu: {'tak' if s.timing else 'nie'}")
+    print(f"  raport:  {'tak' if s.report else 'nie'}   pomiar czasu: {'tak' if s.timing else 'nie'}   "
+          f"równolegle: {s.file_workers} plik(i), {s.vlm_parallel} str. do VLM, "
+          f"{s.ollama.num_parallel} zapytań w serwerze")
 
 
 # ---------------------------------------------------------------- przygotowanie
@@ -159,6 +186,17 @@ def setup_vlm(s: Settings):
         return None, 0
     from .llm import VLMRefiner, load_config
     cfg = load_config(s.vlm_config)
+    cfg["parallel"] = s.vlm_parallel
+    if cfg["backend"] == "ollama":
+        from .ollama_server import ensure_model, prepare
+        try:
+            cfg["base_url"], how = prepare(cfg["base_url"], s.ollama)
+            print(f"Ollama: {how}")
+        except Exception as e:
+            print(f"Nie udało się uruchomić własnego serwera Ollama ({e}) - używam {cfg['base_url']}",
+                  file=sys.stderr)
+        if s.ollama.auto_pull:
+            ensure_model(cfg["base_url"].rstrip("/"), s.model or cfg["model"])
     vlm = VLMRefiner(cfg, model=s.model)
     if not vlm.available():
         print(f"VLM niedostępny ({vlm.base}) - tryb CPU: geometria + OCR", file=sys.stderr)
@@ -256,13 +294,14 @@ def fmt_time(sec: float) -> str:
     return f"{int(h)} h {int(m):02d} min {int(s_):02d} s"
 
 
-def process_file(i: int, n: int, p: Path, s: Settings, ocr, vlm, stats: RunStats) -> FileResult:
+def process_file(n: int, p: Path, s: Settings, ocr, vlm, stats: RunStats) -> FileResult:
     name = p.name.removesuffix(".fields.json") if s.rebuild else p.name
     t0 = time.perf_counter()
     try:
         g = recognize(p, s, ocr, vlm)
         errs, warns = save_outputs(p, name, g, s, ocr)
         res = FileResult(name, True, int(g.get("pages") or 0), len(g["fields"]), time.perf_counter() - t0)
+        i = stats.done()
         msg = (f"[OK] [{i}/{n}] {name}: {res.fields} pól, {res.pages} str. ({', '.join(g['text_source'])}); "
                f"walidacja: {len(errs)} błędów, {len(warns)} ostrzeżeń")
         if s.timing:
@@ -272,6 +311,7 @@ def process_file(i: int, n: int, p: Path, s: Settings, ocr, vlm, stats: RunStats
             print(f"     BŁĄD: {e}", file=sys.stderr)
     except Exception as e:
         res = FileResult(name, False, seconds=time.perf_counter() - t0)
+        i = stats.done()
         msg = f"[ERR] [{i}/{n}] {name}: {e}"
         if s.timing:
             msg += f" | plik: {fmt_time(res.seconds)} | łącznie: {fmt_time(stats.elapsed)}"
@@ -282,8 +322,13 @@ def process_file(i: int, n: int, p: Path, s: Settings, ocr, vlm, stats: RunStats
 
 def process_files(files: list[Path], s: Settings, ocr, vlm) -> RunStats:
     stats = RunStats()              # zegar startuje razem z rozpoznawaniem pierwszego pliku
-    for i, p in enumerate(files, 1):
-        stats.results.append(process_file(i, len(files), p, s, ocr, vlm, stats))
+    if s.file_workers > 1 and len(files) > 1:
+        # kilka plików naraz: LibreOffice/OCR (CPU) jednego pliku nakłada się z VLM (GPU) innego
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=s.file_workers) as ex:
+            stats.results = list(ex.map(lambda p: process_file(len(files), p, s, ocr, vlm, stats), files))
+    else:
+        stats.results = [process_file(len(files), p, s, ocr, vlm, stats) for p in files]
     return stats
 
 
