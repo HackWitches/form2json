@@ -55,6 +55,10 @@ plik ─► loaders ─► strony: raster + słowa z pozycjami ─► detect (Op
 
 ## Instalacja (Windows, RTX 4090)
 
+Wymagany Python 3.11+ (`tomllib`).
+Testy: `pip install pytest==9.2.0`, potem z katalogu nadrzędnego `python -m pytest form2json/tests`.
+Pliki formularzy konkursowych (`f1.pdf`, `f5.PDF`, `f5.docx`, referencje COI w `refs/`) trzeba podłożyć w `form2json/tests/fixtures` albo wskazać zmienną `F2J_FIXTURES`; bez nich część testów jest pomijana (`pytest -rs`).
+
 ```powershell
 python -m venv .venv-form2json
 .venv-form2json\Scripts\python -m pip install -r form2json\requirements.txt
@@ -120,7 +124,8 @@ Konfiguracja VLM: `config/local.toml` (model, adres Ollamy, rozmiar obrazu, kont
 | Wniosek o ustalenie numeru porządkowego nieruchomości | 91% | 100% | 98% |
 | Wniosek o stwierdzenie nadpłaty podatku | 84% | 71% | 98% |
 
-  Wynik jest jednakowy dla PDF / DOC / DOCX / ODS / XLSX / JPG / PNG tego samego formularza.
+  Z VLM wynik jest jednakowy dla PDF / DOC / DOCX / ODS / XLSX / JPG / PNG tego samego formularza.
+  Bez VLM skany (JPG/PNG) dają mniej pól niż PDF/Office (formularz 5: 9-10 zamiast 12).
 * Czas: ~10–20 s na stronę (LibreOffice + OCR + VLM). Bez GPU (`--no-vlm`) kilka sekund na plik,
   ale z gorszymi etykietami pól („w kwocie” zamiast „Kwota nadpłaty”).
 * Zabezpieczenia: wysokie skany (kilka stron w jednym obrazie) są dzielone na strony A4; ucięty JSON z

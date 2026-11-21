@@ -1,6 +1,6 @@
 # Python >= 3.11 (tomllib). Wersje sprawdzone testami: python -m pytest form2json/tests
 # rdzeń (CPU, wystarcza dla PDF/DOCX/XLSX/ODS z warstwą tekstową); licencje bez copyleftu
-pymupdf==2.1                     # AGPL-3.0 - do zastąpienia (patrz migracja)
+pymupdf==2.1                     # AGPL-3.0 - do zastąpienia przez pdfplumber + pypdfium2 (osobny PR)
 opencv-python-headless==5.1.0.95 # Apache-2.0 (koło zawiera biblioteki FFmpeg na LGPL - do oceny)
 numpy==2.5.5
 python-docx==1.2.0
