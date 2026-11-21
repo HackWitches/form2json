@@ -16,14 +16,12 @@ from .typing_rules import norm
 from .validate import validate
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("dir")
-    ap.add_argument("--ref", default=".")
-    a = ap.parse_args(argv)
-    out = Path(a.dir)
+def generate_report(out_dir: str | Path, ref_dir: str | Path = ".", summary: dict | None = None,
+                    echo: bool = True) -> Path:
+    """Tworzy <out_dir>/RAPORT.md; summary (z cli.summarize) dopisuje sekcję czasu przetwarzania."""
+    out = Path(out_dir)
     refs = {}
-    for r in Path(a.ref).rglob("konfiguracja_form_*.json"):
+    for r in Path(ref_dir).rglob("konfiguracja_form_*.json"):
         d = json.loads(r.read_text("utf-8"))
         refs[norm(d["title"])] = d
     rows, by_form = [], defaultdict(list)
@@ -52,8 +50,28 @@ def main(argv=None) -> int:
               "|---|---|---|---|"]
     for stem, ns in by_form.items():
         lines.append(f"| {stem[:60]} | {min(ns)} | {max(ns)} | {len(ns)} |")
-    (out / "RAPORT.md").write_text("\n".join(lines) + "\n", "utf-8")
-    print("\n".join(lines))
+    if summary:
+        from .cli import fmt_time
+        lines += ["", "## Ostatnie uruchomienie", "", "| miara | wartość |", "|---|---|",
+                  f"| rozpoznane pliki | {summary['files_ok']}/{summary['files']} |",
+                  f"| rozpoznane strony | {summary['pages']} |",
+                  f"| wykryte pola do wpisania danych | {summary['fields']} |",
+                  f"| czas łącznie | {fmt_time(summary['seconds'])} |",
+                  f"| średnio na plik | {fmt_time(summary['per_file'])} |",
+                  f"| średnio na stronę | {fmt_time(summary['per_page'])} |"]
+    path = out / "RAPORT.md"
+    path.write_text("\n".join(lines) + "\n", "utf-8")
+    if echo:
+        print("\n".join(lines))
+    return path
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser()
+    ap.add_argument("dir")
+    ap.add_argument("--ref", default=".")
+    a = ap.parse_args(argv)
+    generate_report(a.dir, a.ref)
     return 0
 
 

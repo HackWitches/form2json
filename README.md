@@ -69,6 +69,31 @@ zużywają limit tokenów na rozumowanie i zwracają pustą odpowiedź.
 
 ## Uruchomienie
 
+Najprościej: ustaw ścieżki w `form2json/runtime.config` i uruchom bez parametrów
+(w PyCharm/IntelliJ: *Script path* = `form2json\run.py`, bez parametrów i bez katalogu roboczego):
+
+```powershell
+python form2json\run.py            # albo: python -m form2json   (z katalogu Formularze-Wypakowane)
+python form2json\run.py --fast     # prostszy, szybszy model (profile = fast)
+```
+
+`runtime.config`:
+
+| sekcja / klucz | znaczenie |
+|---|---|
+| `[paths] input`, `output` | katalog lub pliki wejściowe (kilka rozdzielonych `;`), katalog wyników |
+| `[model] vlm_enabled` | `true` = VLM na GPU, `false` = tylko geometria + OCR (CPU) |
+| `[model] profile` | `default` (**qwen3-vl:8b-instruct**, model domyślny) / `fast` (qwen3-vl:4b-instruct) / `accurate` (qwen3-vl:30b-a3b-instruct) |
+| `[processing] ocr`, `tabs`, `dpi`, `debug` | jak parametry `--ocr`, `--tabs`, `--dpi`, `--debug` |
+| `[report] enabled`, `ref_dir` | generowanie `RAPORT.md` w katalogu wyników i katalog z plikami `konfiguracja_form_*.json` |
+| `[timing] enabled` | czas pliku i czas łączny w linii `[OK]` + podsumowanie (pliki, strony, pola, czas łączny, średnio na plik i na stronę) |
+
+Parametry z linii poleceń mają pierwszeństwo przed `runtime.config` (`--no-report`, `--no-timing`,
+`--profile`, `--vlm-model`, `--runtime-config inny.config`...). Jeśli model wybranego profilu nie jest pobrany
+w Ollamie, program wypisze polecenie `ollama pull` i użyje modelu domyślnego.
+
+Pozostałe tryby:
+
 ```powershell
 # wszystkie formularze w katalogu (GPU, jeśli Ollama działa; inaczej automatycznie CPU)
 python -m form2json . -o wyniki
