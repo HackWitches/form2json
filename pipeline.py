@@ -156,8 +156,8 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
         fs, heads = det.detect()
         # sekcja kontynuowana z poprzedniej strony
         for f in fs:
-            if carry and (not f.section or not heads or f.bbox[1] < heads[0].box.y0):
-                f.section = carry if not f.section else f.section
+            if carry and not f.section:
+                f.section = carry
         if fs:
             carry = fs[-1].section or carry
         fields.extend(fs)
@@ -207,10 +207,5 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
         "sections": sections,
         **({"vlm": {"model": vlm.model, "raw": vlm.raw}} if used_vlm else {}),
         "fields": [f.to_dict() for f in fields],
-        # Widok uproszczony: "Opis pola" -> "Rodzaj pola"
-        "simple": [{"Opis pola": f.label, "Rodzaj pola": SIMPLE_TYPE.get(f.type, f.type),
-                    "Rodzaj szczegółowy": f.type, "Rola": f.role, "Wymagane": bool(f.required),
-                    **({"Opcje": f.options} if f.options else {}),
-                    **({"Zależy od": f"{f.depends_on} = {f.depends_value}"} if f.depends_on else {}),
-                    **({"Sekcja": f.section} if f.section else {})} for f in fields],
+        "simple": simple_view(fields),      # widok uproszczony: "Opis pola" -> "Rodzaj pola"
     }

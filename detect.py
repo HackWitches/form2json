@@ -345,7 +345,6 @@ class FormDetector:
                 prev.n_cells += r.n_cells
                 prev.parts = [prev.n_cells]
                 prev.kind = "comb"
-                prev.rows = getattr(prev, "rows", 1) + 1
                 continue
             comb_regs.append(r)
         regs.extend(comb_regs)
@@ -604,8 +603,3 @@ class FormDetector:
             else:
                 obj.section = " > ".join(s for _, s in stack)
 
-
-def detect_page(page: Page) -> tuple[list[FieldCandidate], list[str]]:
-    det = FormDetector(page)
-    fields, heads = det.detect()
-    return fields, [h.text for h in heads]

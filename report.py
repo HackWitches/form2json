@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 from collections import defaultdict
 from pathlib import Path
 
@@ -29,10 +28,11 @@ def main(argv=None) -> int:
     rows, by_form = [], defaultdict(list)
     for p in sorted(out.glob("*.form.json")):
         fd = json.loads(p.read_text("utf-8"))
-        g = json.loads(p.with_name(p.name.replace(".form.json", ".fields.json")).read_text("utf-8"))
+        gp = p.with_name(p.name.replace(".form.json", ".fields.json"))
+        g = json.loads(gp.read_text("utf-8")) if gp.exists() else {"fields": [], "text_source": ["?"]}
         e, w = validate(fd)
         name = p.name.removesuffix(".form.json")
-        stem, ext = name.rsplit(".", 1)
+        stem, ext = (name.rsplit(".", 1) + [""])[:2]
         n_comp = len(fields(fd))
         ref = next((v for k, v in refs.items() if k in norm(stem) or norm(stem) in k), None)
         cmp = compare(fd, ref) if ref else None

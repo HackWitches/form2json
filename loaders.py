@@ -113,7 +113,7 @@ def native_text(path: Path) -> str:
             return "\n".join(out)
         if ext == ".ods":
             from odf.opendocument import load
-            from odf import text as odftext, table as odftable
+            from odf import table as odftable
             from odf.element import Element
             doc = load(str(path))
             out = []

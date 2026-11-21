@@ -157,7 +157,8 @@ def detect_entities(fields: list[FieldCandidate], text: str) -> dict:
 
 
 ADDRESSEE_RE = re.compile(r"(?<![\w])(Burmistrz|Wójt|WÓJT|BURMISTRZ|Prezydent|PREZYDENT|Starosta|STAROSTA|"
-                          r"Marszałek|Urząd|URZĄD|Zarząd|Dyrektor|Komendant|Kierownik|Naczelnik|Rada|RADA)"
+                          r"Marszałek|MARSZAŁEK|Urząd|URZĄD|Zarząd|ZARZĄD|Dyrektor|DYREKTOR|Komendant|KOMENDANT|"
+                          r"Kierownik|KIEROWNIK|Naczelnik|NACZELNIK|Rada|RADA)"
                           r"(?![\wąćęłńóśźż])(.*)$")
 ADDR_LINE = re.compile(r"\d|\bul\.|\bal\.|^\s*$|wnios|deklarac|zarzadz|regulamin|instrukcj")
 
