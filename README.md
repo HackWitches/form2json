@@ -1,58 +1,110 @@
-# form2json — konwersja formularzy do JSON (self-hosted)
+# form2json — konwersja formularzy papierowych do JSON (on-premise, RTX 4090 / CPU)
 
-Wejście: `PDF, DOC, DOCX, ODS, XLSX, JPG/JPEG, PNG` → wyjście dla każdego pliku:
+Wejście: `PDF, DOC, DOCX, ODS, XLSX, JPG/JPEG, PNG`. Dla każdego pliku powstają:
 
 | plik | zawartość |
 |---|---|
-| `*.fields.json` | **ogólny JSON**: lista pól `label` (opis pola) → `type` (rodzaj pola) + sekcja, opcje, bbox, liczba kratek, część adresu, pewność; dodatkowo widok `simple`: `{"Opis pola": …, "Rodzaj pola": …}` |
-| `*.form.json` | docelowy **FormDefinition** (`tabs` → `SECTION` → `repeatingSectionGrid`, `flow.links`) |
-| `*.pN.debug.png` | (opcja `--debug`) podgląd: wykryte pola, ich typy i powiązane opisy |
+| `*.simple.json` | **ogólny JSON klucz → wartość**: `Opis pola`, `Rodzaj pola` (string / number / email / phone / date / address / checkbox), rodzaj szczegółowy (pesel, nip, iban, postal_code, textarea, radio, file…), rola, obligatoryjność, opcje, zależność |
+| `*.fields.json` | pełny wynik pośredni: pola + bbox, sekcje, adresat, wykryte podmioty, surowa odpowiedź VLM |
+| `*.form.json` | docelowy **FormDefinition** (`tabs` → `SECTION` → `repeatingSectionGrid`, `flow.links`), zgodny ze schematem `importowanyPlikJsonSchemat.json` i z regułami technicznymi |
+
+Wszystko działa lokalnie: bez zewnętrznych API, bez trenowania modeli.
 
 ## Architektura
 
 ```
- plik ──► loaders ──► strony (raster + słowa z pozycjami) ──► detect (geometria) ──► typing_rules
-           │  PDF: PyMuPDF (warstwa tekstowa, pogrubienia)                     │
-           │  DOC/DOCX/ODS/XLSX: LibreOffice headless → PDF                    ▼
-           │  JPG/PNG/skan: deskew + OCR (PaddleOCR GPU / Tesseract)     kandydaci pól
-           ▼                                                                   │
-      tekst natywny (python-docx / openpyxl / odfpy) ─────────────► [opcjonalnie] VLM na DGX
-                                                                    (Qwen3-VL przez vLLM, JSON-schema)
-                                                                               ▼
-                                                     *.fields.json ──► build ──► *.form.json
+plik ─► loaders ─► strony: raster + słowa z pozycjami ─► detect (OpenCV) ─► kandydaci pól
+         PDF: PyMuPDF (warstwa tekstowa)                  ramki, kratki, checkboxy,
+         DOC/DOCX/ODS/XLSX: LibreOffice → PDF             linie, wykropkowania + opisy
+         JPG/PNG: prostowanie + Tesseract (pol)                     │
+                                                                     ▼
+                                     VLM na RTX 4090 (Ollama, qwen3-vl:8b-instruct)
+                                     obraz strony + tekst → pola, rola, wymagalność,
+                                     zależności (JSON wymuszony schematem); bbox z geometrii
+                                                                     │
+                                   reguły PL (typing_rules): PESEL, NIP, REGON, IBAN, kod,
+                                   data, kwoty, adres; semantic: rola, wymagalność, SHOW
+                                                                     │
+               *.simple.json / *.fields.json ─► build (standard formularzy) ─► *.form.json ─► validate
 ```
 
-1. **Jeden tor dla wszystkich formatów** – wszystko sprowadzamy do „obraz strony + słowa z bbox”.
-   Formaty natywne mają dokładny tekst (bez błędów OCR), obrazy idą przez OCR.
-2. **Detekcja geometrii (OpenCV, bez uczenia)** – morfologia wyciąga linie poziome/pionowe, a obszary
-   zamknięte liniami dają ramki/komórki. Klasyfikacja: `box`, `comb` (kratki na znaki, łączone przez
-   „-” w datę/kod), `checkbox`, `captioned` (opis w komórce + puste miejsce), `underline`,
-   `dots` (wykropkowania z tekstu oraz z rastra).
-3. **Wiązanie opisu z polem** – w środku > z lewej (także opisy wieloliniowe) > nad (także nagłówek kolumny
-   tabeli) > pod (podpis „(imię i nazwisko)” pod wykropkowaniem); dla checkboxa opis z prawej.
-4. **Sekcje** – numerowane, pogrubione nagłówki (`2.`, `2.1.`) → ścieżka sekcji.
-5. **Rodzaj pola** – reguły PL (e-mail, telefon, PESEL, NIP, IBAN, kod, data, elementy adresu, kwoty,
-   uzasadnienie) + liczba kratek (2-2-4 = data, 2-3 = kod, 11 = PESEL, 10 = NIP, 26 = IBAN) +
-   wysokość ramki (textarea). Grupy checkboxów → `radio` z `options`; w „Załącznikach” → `file`.
-6. **VLM (opcjonalnie, `--vlm`)** – lokalny model wizyjny dostaje obraz + kandydatów i zwraca poprawioną
-   listę (dodaje brakujące, usuwa fałszywe, nadaje sekcje/opcje). Wyjście wymuszone schematem JSON
-   (guided decoding vLLM). Pola z VLM dowiązywane są do bbox z geometrii.
+1. **Jeden tor dla wszystkich formatów**: każdy plik staje się „obrazem strony + słowami z bbox”.
+   Formaty z tekstem (PDF, Office) mają dokładny tekst, obrazy idą przez OCR.
+2. **Geometria (OpenCV, bez uczenia)**: linie, ramki, kratki (2-2-4 = data, 2-3 = kod, 11 = PESEL…),
+   checkboxy, wykropkowania. Opis pola szukany w środku, z lewej, nad i pod polem.
+3. **VLM (GPU)**: lokalny Qwen3-VL czyta stronę i zwraca krótkie, przeredagowane etykiety
+   („w kwocie ……” → „Kwota nadpłaty”), łączy warianty w `radio`, wykrywa pola warunkowe
+   („jeżeli tak, podaj…”), nadaje rolę (dane wnioskodawcy, adres, przedmiot wniosku, załącznik,
+   oświadczenie, podpis, pole urzędu). Wynik jest walidowany regułami. Bez GPU ten krok jest pomijany.
+4. **Builder zgodny ze standardem** („Standardy i dobre praktyki”, „Reguły techniczne”):
+   * strona **Dane**: Urząd/Organ (adresat wykryty z dokumentu, tylko do odczytu), Podmiot wniosku,
+     Twoje dane (dane inicjalne `MLPZ.*`, `EXTERNAL_SYSTEM`, tylko do odczytu), Adres zamieszkania
+     (Kraj ze słownikiem `Kraje`, `TERYT_4G_DOWODOWY`, warianty PL i zagranica przez jsonata `SHOW`),
+     warunkowo: Dane innej osoby, Dane podmiotu, Adres siedziby, Pełnomocnictwo, Opłata skarbowa (v1, v2)
+   * strony **przedmiotu wniosku**: pola z formularza; `date` → `DATEPICKER`, kwoty → `NUMBER`,
+     opisy → `TEXTAREA`, wybór jednej opcji → `RADIO` (>5 opcji → `SELECT`, >15 z wyszukiwarką),
+     wielokrotny → `CHECKBOX`, załączniki → `FILE_UPLOADER`, powtarzane wiersze tabel → `REPEATING_SECTION`
+   * strona **Kontakt i zgody**: telefon/e-mail (`MLPZ`, walidator `EMAIL`), oświadczenia z formularza
+     → `CONSENT_SECTION`, zgoda RODO
+   * strona **FINISH**: wyłącznie `INFO_SECTION` (podgląd)
+   * walidatory: `REQUIRED`, `EMAIL`, `PESEL`, `NIP`, `REGON`, `ZIP_CODE`, `SERIAL_NUMBER_ID_CARD`
+   * pomijane: podpis (zastępuje go podpis elektroniczny), „miejscowość, data”, pola „wypełnia urząd”
+5. **Walidator** (`validate.py`): schemat JSON + reguły techniczne (≥2 strony, FINISH na końcu i tylko
+   INFO_SECTION, pola w sekcjach, brak zagnieżdżeń, unikalne id i techName, opcje albo słownik,
+   poprawne odwołania jsonata, osiągalność stron w `flow.links`).
+
+## Instalacja (Windows, RTX 4090)
+
+```powershell
+python -m venv .venv-form2json
+.venv-form2json\Scripts\python -m pip install -r form2json\requirements.txt
+winget install UB-Mannheim.TesseractOCR
+winget install TheDocumentFoundation.LibreOffice
+winget install Ollama.Ollama
+ollama pull qwen3-vl:8b-instruct
+```
+
+Używaj wariantów `-instruct`. Domyślne tagi `qwen3-vl:8b` i `qwen3-vl:30b` to modele „thinking”:
+zużywają limit tokenów na rozumowanie i zwracają pustą odpowiedź.
 
 ## Uruchomienie
 
-```bash
-pip install -r requirements.txt pytesseract     # + LibreOffice i Tesseract w systemie
-python -m form2json "../" -o ../wyniki --debug                     # wszystkie formaty, CPU
-python -m form2json "../" -o ../wyniki --ocr tesseract             # obrazy przez Tesseract (CPU)
-python -m form2json "../" -o ../wyniki --ocr paddle --vlm          # DGX: PaddleOCR GPU + VLM
+```powershell
+# wszystkie formularze w katalogu (GPU, jeśli Ollama działa; inaczej automatycznie CPU)
+python -m form2json . -o wyniki
+
+# tylko CPU (Ryzen), bez VLM
+python -m form2json . -o wyniki --no-vlm
+
+# większy model (MoE, ~20 GB VRAM)
+python -m form2json plik.pdf -o wyniki --vlm-model qwen3-vl:30b-a3b-instruct
+
+# po zmianie reguł: przebuduj FormDefinition z zapisanych *.fields.json (bez OCR i VLM, sekundy)
+python -m form2json --rebuild "wyniki/*.fields.json" -o wyniki
+
+# raport zbiorczy (walidacja, recall względem referencji, spójność formatów) -> wyniki/RAPORT.md
+python -m form2json.report wyniki --ref .
+
+# podgląd, walidacja, porównanie z referencją
+python -m form2json.show wyniki\plik.pdf.form.json
+python -m form2json.validate wyniki\*.form.json
+python -m form2json.compare wyniki\plik.pdf.form.json konfiguracja_form_....json
 ```
 
-## Konfiguracja
+Konfiguracja VLM: `config/local.toml` (model, adres Ollamy, rozmiar obrazu, kontekst). Zmienne
+`FORM2JSON_VLM_URL` i `FORM2JSON_VLM_MODEL` nadpisują wartości z pliku. Tesseract: modele w
+`tessdata/` (`pol` z tessdata_best), zmienne `TESSERACT_CMD`, `TESSDATA_DIR`, `FORM2JSON_OCR_LANG`.
 
-* **DGX / VLM** – `config/dgx.toml` (adres vLLM, model, timeouty, TLS). Klucz API w zmiennej
-  środowiskowej wskazanej przez `api_key_env` (domyślnie `FORM2JSON_VLM_KEY`).
-  VLM włącza flaga `--vlm` albo `enabled = true` w pliku; `--dgx-config` wskazuje inny plik.
-* **Tesseract** – modele w `tessdata/` (projekt, przenośne): `pol.traineddata` z *tessdata_best*
-  + `osd`/`eng` skopiowane z instalacji. Zmienne: `TESSERACT_CMD`, `TESSDATA_DIR`, `FORM2JSON_OCR_LANG`
-  (domyślnie `pol`). Obraz jest powiększany do ~300 DPI przed OCR.
-* **LibreOffice** – wykrywany automatycznie (`soffice` w PATH lub `C:\Program Files\LibreOffice`).
+## Moduły
+
+| moduł | rola |
+|---|---|
+| `loaders.py` | wczytanie formatu → strony (raster + słowa); LibreOffice headless dla Office |
+| `ocr.py` | Tesseract (CPU, domyślnie), opcjonalnie PaddleOCR |
+| `detect.py` | detekcja geometrii pól i wiązanie opisów |
+| `typing_rules.py` | rodzaj pola z opisu / liczby kratek / kształtu |
+| `llm.py` | lokalny VLM (Ollama) z wymuszonym schematem JSON |
+| `semantic.py` | role, obligatoryjność, zależności, adresat, typ wnioskodawcy |
+| `build.py` | FormDefinition zgodny ze standardem i regułami |
+| `validate.py` | walidacja schematu i reguł |
+| `compare.py`, `show.py` | ocena względem referencji, podgląd |

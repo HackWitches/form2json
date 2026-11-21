@@ -1,4 +1,4 @@
-"""CLI:  python -m form2json <pliki/katalogi...> -o out/ [--ocr paddle] [--vlm]
+"""CLI:  python -m form2json <pliki/katalogi...> -o out/ [--ocr tesseract] [--no-vlm]
 
 Dla każdego pliku zapisuje:
   <nazwa>.<ext>.fields.json  - ogólny JSON (opis pola -> rodzaj pola, sekcja, bbox, opcje)
@@ -25,7 +25,10 @@ def iter_inputs(paths: list[str], exclude: Path | None = None):
     for p in map(Path, paths):
         if p.is_dir():
             yield from sorted(q for q in p.rglob("*") if q.suffix.lower() in SUPPORTED
-                              and not (ex and ex in q.resolve().parents))
+                              and not (ex and ex in q.resolve().parents)
+                              and "wizualizacja" not in q.name.lower()      # gotowe wizualizacje, nie formularze
+                              and not any(x.name in ("form2json", ".venv") or x.name.startswith("wyniki")
+                                          for x in q.parents))
         elif p.suffix.lower() in SUPPORTED:
             yield p
 
@@ -57,36 +60,61 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser(prog="form2json")
     ap.add_argument("inputs", nargs="+")
     ap.add_argument("-o", "--out", default="out")
-    ap.add_argument("--ocr", default="none", help="none|paddle|paddle-cpu|tesseract (obrazy i skany)")
-    ap.add_argument("--vlm", action="store_true", help="weryfikacja przez VLM na DGX (config/dgx.toml)")
-    ap.add_argument("--no-vlm", action="store_true", help="wyłącz VLM nawet gdy enabled=true w configu")
-    ap.add_argument("--dgx-config", default=None, help="ścieżka do pliku konfiguracji DGX (domyślnie config/dgx.toml)")
-    ap.add_argument("--tabs", default="top-section", choices=["top-section", "single"])
+    ap.add_argument("--ocr", default="auto", help="auto|tesseract|paddle|paddle-cpu|none (obrazy i skany)")
+    ap.add_argument("--vlm", action="store_true", help="wymuś VLM (lokalny Ollama na GPU, config/local.toml)")
+    ap.add_argument("--no-vlm", action="store_true", help="bez VLM - tylko geometria + OCR (CPU)")
+    ap.add_argument("--vlm-model", default=None, help="np. qwen3-vl:8b, qwen3-vl:30b")
+    ap.add_argument("--rebuild", action="store_true", help="wejście: *.fields.json - przebuduj tylko *.form.json")
+    ap.add_argument("--config", default=None, help="plik konfiguracji VLM (domyślnie config/local.toml)")
+    ap.add_argument("--tabs", default="auto", choices=["auto", "single"])
     ap.add_argument("--dpi", type=int, default=150)
     ap.add_argument("--debug", action="store_true")
     a = ap.parse_args(argv)
+    if a.rebuild:
+        a.no_vlm, a.ocr = True, "none"
 
     from .ocr import get_ocr
     ocr = get_ocr(a.ocr)
     from .llm import VLMRefiner, load_config
-    cfg = load_config(a.dgx_config)
-    vlm = VLMRefiner(cfg) if (a.vlm or cfg["enabled"]) and not a.no_vlm else None
-    if vlm:
-        print(f"VLM: {vlm.model} @ {vlm.base}")
+    cfg = load_config(a.config)
+    vlm = None
+    if (a.vlm or cfg["enabled"]) and not a.no_vlm:
+        vlm = VLMRefiner(cfg, model=a.vlm_model)
+        if vlm.available():
+            print(f"VLM: {vlm.model} @ {vlm.base} ({vlm.backend})")
+        else:
+            print(f"VLM niedostępny ({vlm.base}) - tryb CPU: geometria + OCR", file=sys.stderr)
+            if a.vlm:
+                return 2
+            vlm = None
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
     rc = 0
-    for p in iter_inputs(a.inputs, out):
-        name = p.name
+    # --rebuild: tylko ponowne zbudowanie *.form.json z istniejących *.fields.json (bez OCR/VLM)
+    inputs = sorted(Path(x) for pat in a.inputs for x in (Path().glob(pat) if "*" in pat else [pat])) \
+        if a.rebuild else iter_inputs(a.inputs, out)
+    for p in inputs:
+        name = p.name.removesuffix(".fields.json") if a.rebuild else p.name
         try:
-            g = extract(p, ocr=ocr, vlm=vlm, dpi=a.dpi)
+            if a.rebuild:
+                from .pipeline import reanalyze
+                g = reanalyze(json.loads(Path(p).read_text("utf-8")))
+            else:
+                g = extract(p, ocr=ocr, vlm=vlm, dpi=a.dpi)
             (out / f"{name}.fields.json").write_text(json.dumps(g, ensure_ascii=False, indent=2), "utf-8")
             fd = to_form_definition(g, a.tabs)
             (out / f"{name}.form.json").write_text(json.dumps(fd, ensure_ascii=False, indent=2), "utf-8")
             if a.debug:
                 draw_debug(p, g, out / f"{name}.debug.png", a.dpi, ocr)
-            print(f"[OK] {name}: {len(g['fields'])} pól ({', '.join(g['text_source'])})")
+            from .validate import validate
+            errs, warns = validate(fd)
+            (out / f"{name}.simple.json").write_text(json.dumps(
+                {"title": g["title"], "pola": g["simple"]}, ensure_ascii=False, indent=2), "utf-8")
+            print(f"[OK] {name}: {len(g['fields'])} pól ({', '.join(g['text_source'])}); "
+                  f"walidacja: {len(errs)} błędów, {len(warns)} ostrzeżeń")
+            for e in errs:
+                print(f"     BŁĄD: {e}", file=sys.stderr)
         except Exception as e:
             rc = 1
             print(f"[ERR] {name}: {e}", file=sys.stderr)

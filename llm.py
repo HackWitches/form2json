@@ -6,8 +6,9 @@ Wszystko działa lokalnie, bez zewnętrznych usług:
   * openai  - dowolny LOKALNY serwer zgodny z OpenAI (llama.cpp server, LM Studio) na localhost
 
 Modele (bez douczania), mieszczące się w 24 GB VRAM:
-  * qwen3-vl:8b   - szybki (~6 GB VRAM), domyślny
-  * qwen3-vl:30b  - MoE A3B (Q4, ~20 GB VRAM), dokładniejszy
+  * qwen3-vl:8b-instruct        - szybki (~6 GB VRAM), domyślny
+  * qwen3-vl:30b-a3b-instruct   - MoE A3B (Q4, ~20 GB VRAM), dokładniejszy
+  (warianty bez '-instruct' to modele 'thinking' - wolne i zużywają limit tokenów na rozumowanie)
   * qwen2.5vl:7b  - alternatywa
 
 VLM dostaje stronę (obraz) + kandydatów z detektora geometrii + tekst strony
@@ -93,8 +94,18 @@ Dla każdego pola podaj:
   voivodeship | country | full,
 - depends_on + depends_value: jeżeli pole wypełnia się tylko po wybraniu opcji w innym polu
   (np. "jeżeli tak, podaj...", "inne - jakie?"), podaj label tamtego pola i wartość opcji.
-Grupę checkboxów, z której wybiera się jedną opcję, zwróć jako JEDNO pole typu radio z options.
-Kilka linii wykropkowanych pod jednym opisem to jedno pole textarea.
+ZASADY:
+1. label ma być krótką nazwą pola (2-6 słów), zrozumiałą bez kontekstu. Fragmenty zdań przeredaguj, np.
+   "...wnoszę o stwierdzenie nadpłaty z tytułu ....." -> "Tytuł nadpłaty"; "w kwocie ....." -> "Kwota nadpłaty";
+   "w miejscowości ....." -> "Miejscowość"; "Wrocław, dnia ....." -> "Data" (role place_date).
+2. Grupę checkboxów lub numerowanych wariantów (1, 2, a), b)), z których wybiera się jeden, zwróć jako
+   JEDNO pole typu radio: label = pytanie (np. "Sposób rozliczenia nadpłaty"), options = krótkie nazwy wariantów.
+   Jeśli przy wariancie jest miejsce do wpisania (np. numer rachunku), dodaj osobne pole z depends_on = label
+   pola radio i depends_value = nazwa wariantu.
+3. Kilka linii wykropkowanych pod jednym opisem to jedno pole textarea. Kwoty, liczby, powierzchnie -> number.
+4. Załączniki wymienione na liście (do dołączenia) -> type file, role attachment.
+5. Oświadczenia do zaznaczenia ("Oświadczam, że...", "Wyrażam zgodę...") -> role statement, label = treść.
+6. Nie dubluj pól. Pomijaj pola wypełniane przez urząd tylko oznaczając je role office_use.
 Zachowaj kolejność czytania. Odpowiadaj wyłącznie JSON-em zgodnym ze schematem."""
 
 
@@ -129,7 +140,7 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg.setdefault("enabled", False)
     cfg.setdefault("backend", "ollama")
     cfg.setdefault("base_url", "http://localhost:11434")
-    cfg.setdefault("model", "qwen3-vl:8b")
+    cfg.setdefault("model", "qwen3-vl:8b-instruct")
     cfg.setdefault("api_key_env", "FORM2JSON_VLM_KEY")
     cfg.setdefault("verify_tls", True)
     cfg.setdefault("ca_bundle", "")
@@ -138,6 +149,7 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg.setdefault("temperature", 0.0)
     cfg.setdefault("max_image_side", 1600)
     cfg.setdefault("num_ctx", 16384)
+    cfg.setdefault("use_candidates", False)
     cfg["backend"] = os.environ.get("FORM2JSON_VLM_BACKEND", cfg["backend"])
     cfg["base_url"] = os.environ.get("FORM2JSON_VLM_URL", cfg["base_url"])
     cfg["model"] = os.environ.get("FORM2JSON_VLM_MODEL", cfg["model"])
@@ -198,18 +210,25 @@ class VLMRefiner:
                title_guess: str) -> tuple[str, list[FieldCandidate], str]:
         """Zapytanie per strona (mniejsze modele lepiej radzą sobie z jedną stroną)."""
         res: list[FieldCandidate] = []
+        self.raw: list[dict] = []          # surowe odpowiedzi modelu (zapisywane w *.fields.json)
         title, addressee = title_guess, ""
         for page in pages:
             pc = [c for c in cands if c.page == page.index]
             page_text = " ".join(w.text for w in page.words)[:6000]
             for ti, tile in enumerate(_tiles(page.image)):
-                cj = [{"label": c.label, "type": c.type, "section": c.section,
-                       **({"options": c.options} if c.options else {})} for c in pc]
-                prompt = (f"Tytuł formularza (wstępnie): {title_guess}\nStrona {page.index + 1}.\n\n"
-                          f"Kandydaci znalezieni automatycznie przez analizę geometrii (mogą zawierać błędy, "
-                          f"duplikaty, ucięte opisy lub braki - popraw je, uzupełnij brakujące i usuń fałszywe):\n"
-                          f"{json.dumps(cj, ensure_ascii=False)}\n\n"
-                          + (f"Tekst strony (warstwa tekstowa/OCR):\n{page_text}\n\n" if page_text else "")
+                if self.cfg.get("use_candidates"):
+                    cj = [{"label": c.label, "type": c.type, "section": c.section,
+                           **({"options": c.options} if c.options else {})} for c in pc]
+                    hint = (f"Kandydaci znalezieni automatycznie przez analizę geometrii (tylko podpowiedź: mają "
+                            f"ucięte opisy, duplikaty i braki - przeredaguj etykiety zgodnie z ZASADAMI, uzupełnij "
+                            f"brakujące pola, usuń fałszywe, połącz warianty w radio):\n"
+                            f"{json.dumps(cj, ensure_ascii=False)}\n\n")
+                else:
+                    # małe modele "kopiują" etykiety kandydatów - podajemy tylko liczbę wykrytych miejsc
+                    hint = (f"Analiza geometrii (ramki, kratki, wykropkowania) znalazła na tej stronie ok. "
+                            f"{len(pc)} miejsc do wypełnienia - nie pomiń żadnego.\n\n")
+                prompt = (f"Tytuł formularza (wstępnie): {title_guess}\nStrona {page.index + 1}.\n\n" + hint
+                          + (f"Tekst strony (warstwa tekstowa/OCR, pomocniczo):\n{page_text}\n\n" if page_text else "")
                           + "Zwróć kompletną listę pól tej strony w zadanym schemacie JSON.")
                 t0 = time.time()
                 try:
@@ -220,6 +239,7 @@ class VLMRefiner:
                     continue
                 print(f"  [VLM] strona {page.index + 1}.{ti + 1}: {len(out.get('fields', []))} pól, "
                       f"{time.time() - t0:.1f}s", file=sys.stderr)
+                self.raw.append({"page": page.index, "tile": ti, "response": out})
                 if page.index == 0 and ti == 0:
                     title = out.get("title") or title
                     addressee = out.get("addressee") or ""

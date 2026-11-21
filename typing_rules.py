@@ -36,7 +36,7 @@ RULES: list[tuple[str, str, str | None]] = [
     (r"wojewodztw", "address", "voivodeship"),
     (r"\bkraj\b", "address", "country"),
     (r"\badres\b(?!.*(e-?mail|poczty elektr))", "address", "full"),
-    (r"kwota|wysokosc (oplaty|kwoty|nadplaty)|\bzl\b|liczba|ilosc|powierzchni|\bm2\b|\bm²|\bha\b|"
+    (r"kwot[ayi]|kwoci|wysokosc (oplaty|kwoty|nadplaty)|\bzl\b|liczba|ilosc|powierzchni|\bm2\b|\bm²|\bha\b|"
      r"\bwiek\b|rok\b|\bsztuk", "number", None),
     (r"uzasadnienie|opis\b|uwagi|wyjasnieni|informacje dodatkowe|cel ", "textarea", None),
 ]

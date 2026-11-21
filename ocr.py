@@ -1,6 +1,6 @@
 """Wymienne silniki OCR (wszystkie lokalne / self-hosted).
 
-* paddle    - PaddleOCR 3.x (PP-OCRv5), GPU (CUDA) - zalecany na DGX
+* paddle    - PaddleOCR 3.x (PP-OCRv5), opcjonalnie GPU (CUDA, RTX 4090)
 * tesseract - Tesseract 5 + `pol.traineddata`, CPU - prosty fallback
 
 Każdy backend zwraca listę `Word` w pikselach obrazu wejściowego.
@@ -95,8 +95,8 @@ class TesseractBackend:
         tessdir = os.environ.get("TESSDATA_DIR") or (str(TESSDATA_LOCAL) if (TESSDATA_LOCAL / "pol.traineddata").exists() else "")
         self.lang = lang or os.environ.get("FORM2JSON_OCR_LANG", "pol")
         self.config = f"--oem 1 --psm {psm} -c preserve_interword_spaces=1"
-        if tessdir:
-            self.config += f' --tessdata-dir "{tessdir}"'
+        if tessdir:   # przez zmienną środowiskową - cudzysłowy w --tessdata-dir psują się na Windows
+            os.environ["TESSDATA_PREFIX"] = tessdir
         self.target_width = target_width
 
     def __call__(self, img: np.ndarray) -> list[Word]:
@@ -115,6 +115,8 @@ class TesseractBackend:
 
 
 def get_ocr(name: str | None):
+    if name == "auto":
+        return TesseractBackend() if find_tesseract() else None
     if not name or name == "none":
         return None
     if name == "paddle":

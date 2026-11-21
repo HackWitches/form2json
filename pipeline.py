@@ -9,7 +9,10 @@ import numpy as np
 from .detect import NUMBERING_RE, FormDetector, Phrase
 from .loaders import load_document
 from .model import Document, FieldCandidate
-from .typing_rules import SIMPLE_TYPE, norm
+from .semantic import assign_dependencies, assign_required, assign_roles, detect_entities, find_addressee
+from .typing_rules import SIMPLE_TYPE, infer_type, norm
+
+PUNCT_RE = re.compile(r"^[\s\W\d]*$")
 
 MULTI_RE = re.compile(r"mozna zaznaczyc (kilka|wiele)|wielokrotn|zaznacz wszystkie|kilka odpowiedzi")
 
@@ -105,6 +108,27 @@ def merge_continuations(fields: list[FieldCandidate], line_h_by_page: dict[int, 
     return out
 
 
+def simple_view(fields: list[FieldCandidate]) -> list[dict]:
+    return [{"Opis pola": f.label, "Rodzaj pola": SIMPLE_TYPE.get(f.type, f.type),
+             "Rodzaj szczegółowy": f.type, "Rola": f.role, "Wymagane": bool(f.required),
+             **({"Opcje": f.options} if f.options else {}),
+             **({"Zależy od": f"{f.depends_on} = {f.depends_value}"} if f.depends_on else {}),
+             **({"Sekcja": f.section} if f.section else {})} for f in fields]
+
+
+def reanalyze(g: dict) -> dict:
+    """Ponowna analiza semantyczna zapisanego *.fields.json (bez OCR/VLM) - przy zmianie reguł."""
+    from dataclasses import fields as dc_fields
+    names = {x.name for x in dc_fields(FieldCandidate)}
+    fs = [FieldCandidate(**{k: v for k, v in f.items() if k in names}) for f in g["fields"]]
+    assign_roles(fs)
+    assign_dependencies(fs)
+    assign_required(fs)
+    g["fields"] = [f.to_dict() for f in fs]
+    g["simple"] = simple_view(fs)
+    return g
+
+
 def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
     doc = load_document(path, dpi=dpi, ocr=ocr)
     fields: list[FieldCandidate] = []
@@ -128,20 +152,48 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
     fields = merge_continuations(fields, lh)
     fields = group_checkboxes(fields, lh)
     title = guess_title(doc, dets)
+    lines = [Phrase(ln).text for d in dets for ln in d.lines]
+    addressee = find_addressee(lines)
+    used_vlm = False
 
     if vlm is not None:
-        title, fields = vlm.refine([p.image for p in doc.pages], fields, doc.native_text, title)
+        vtitle, fields, vlm_addr = vlm.refine(doc.pages, fields, doc.native_text, title)
+        good = re.compile(r"^(wniosek|deklaracja|zgloszenie|oswiadczenie|zawiadomienie|informacja)")
+        if good.match(norm(vtitle)) and not good.match(norm(title)):
+            title = vtitle
+        addressee = addressee or vlm_addr
+        used_vlm = True
+
+    # rodzaj pola zawsze przechodzi przez reguły PL (walidacja wyniku VLM), potem semantyka
+    for f in fields:
+        if f.detector == "vlm" or "+vlm" in f.detector:
+            t, part = infer_type(f.label, f.section, "vlm", hint=f.hint)
+            if f.type in ("string", "address") and t not in ("string", "textarea"):
+                f.type, f.address_part = t, f.address_part or part
+    # odrzuć śmieci: same znaki, przypisy ("* niepotrzebne skreślić"), etykieta = nagłówek sekcji
+    fields = [f for f in fields if f.label.strip() and not PUNCT_RE.match(f.label)
+              and not re.match(r"^\s*\*", f.label) and "niepotrzebne skresl" not in norm(f.label)
+              and not (f.section and f.type not in ("radio", "checkbox") and "vlm" not in f.detector
+                       and norm(strip_numbering(f.label)) == norm(strip_numbering(f.section.split(" > ")[-1])))]
+    assign_roles(fields)
+    assign_dependencies(fields)
+    assign_required(fields)
+    text = chr(10).join(lines) + chr(10) + doc.native_text
 
     return {
         "source": str(path),
         "title": title,
+        "addressee": addressee,
         "pages": len(doc.pages),
-        "text_source": sorted({p.text_source for p in doc.pages}),
+        "text_source": sorted({p.text_source for p in doc.pages}) + (["vlm"] if used_vlm else []),
+        "entities": detect_entities(fields, text),
         "sections": sections,
+        **({"vlm": {"model": vlm.model, "raw": vlm.raw}} if used_vlm else {}),
         "fields": [f.to_dict() for f in fields],
         # Widok uproszczony: "Opis pola" -> "Rodzaj pola"
         "simple": [{"Opis pola": f.label, "Rodzaj pola": SIMPLE_TYPE.get(f.type, f.type),
-                    "Rodzaj szczegółowy": f.type,
+                    "Rodzaj szczegółowy": f.type, "Rola": f.role, "Wymagane": bool(f.required),
                     **({"Opcje": f.options} if f.options else {}),
+                    **({"Zależy od": f"{f.depends_on} = {f.depends_value}"} if f.depends_on else {}),
                     **({"Sekcja": f.section} if f.section else {})} for f in fields],
     }

@@ -1,8 +1,9 @@
 # Lokalny model wizyjny (VLM) uruchomiony na tej stacji (RTX 4090) przez Ollama.
 # Wszystko działa on-premise: żadnych zewnętrznych API.
 #
-#   ollama pull qwen3-vl:8b        (~6 GB VRAM, szybki)
-#   ollama pull qwen3-vl:30b       (MoE, ~20 GB VRAM, dokładniejszy)
+#   ollama pull qwen3-vl:8b-instruct          (~6 GB VRAM, szybki)
+#   ollama pull qwen3-vl:30b-a3b-instruct     (MoE, ~20 GB VRAM, dokładniejszy)
+# Używaj wariantów -instruct (warianty 'thinking' marnują tokeny na rozumowanie).
 #
 # Bez GPU / bez Ollamy: uruchom z --no-vlm (sama geometria + OCR na CPU).
 # Zmienne FORM2JSON_VLM_URL / FORM2JSON_VLM_MODEL nadpisują wartości stąd.
@@ -12,7 +13,7 @@
 enabled = true
 backend = "ollama"
 base_url = "http://localhost:11434"
-model = "qwen3-vl:8b"
+model = "qwen3-vl:8b-instruct"
 
 timeout_s = 600
 max_tokens = 8000

@@ -6,9 +6,12 @@ python-docx>=1.1
 openpyxl>=3.1
 odfpy>=1.4
 requests>=2.31
+jsonschema>=4.20
+pytesseract>=0.3.10
 
-# OCR dla JPG/PNG i skanów - wybierz jeden:
-# GPU (DGX):  pip install paddlepaddle-gpu==3.* -i https://www.paddlepaddle.org.cn/packages/stable/cu126/ && pip install "paddleocr>=3.0"
-# CPU:        pip install pytesseract   (+ tesseract-ocr i tesseract-ocr-pol w systemie)
 
-# Systemowo: LibreOffice (soffice) do DOC/DOCX/ODS/XLSX -> PDF
+# Systemowo (Windows: winget):
+#   winget install UB-Mannheim.TesseractOCR          OCR obrazów (CPU), model pol w form2json/tessdata
+#   winget install TheDocumentFoundation.LibreOffice DOC/DOCX/ODS/XLSX -> PDF
+#   winget install Ollama.Ollama                     lokalny VLM na GPU (RTX 4090)
+#   ollama pull qwen3-vl:8b-instruct                 (opcjonalnie qwen3-vl:30b-a3b-instruct)
