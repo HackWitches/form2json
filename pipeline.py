@@ -185,6 +185,9 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
             if f.type in ("string", "address") and t not in ("string", "textarea"):
                 f.type, f.address_part = t, f.address_part or part
     # odrzuć śmieci: same znaki, przypisy ("* niepotrzebne skreślić"), etykieta = nagłówek sekcji
+    for f in fields:          # "* NIP" (gwiazdka odnośnika przed krótką etykietą z OCR) -> "NIP"
+        if re.fullmatch(r"\s*\*+\s*\S+(\s+\S+){0,2}", f.label):
+            f.label = f.label.lstrip(" *")
     fields = [f for f in fields if f.label.strip() and not PUNCT_RE.match(f.label)
               and not re.match(r"^\s*\*", f.label) and "niepotrzebne skresl" not in norm(f.label)
               and not (f.section and f.type not in ("radio", "checkbox") and "vlm" not in f.detector
