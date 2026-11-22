@@ -21,7 +21,9 @@ import base64
 import ipaddress
 import json
 import os
+import socket
 import sys
+import threading
 import time
 import tomllib
 from difflib import SequenceMatcher
@@ -156,6 +158,7 @@ def load_config(path: str | Path | None = None) -> dict:
     cfg.setdefault("max_image_side", 1600)
     cfg.setdefault("num_ctx", 16384)
     cfg.setdefault("use_candidates", False)
+    cfg.setdefault("parallel", 1)          # ile stron naraz wysyłać do VLM
     cfg["backend"] = os.environ.get("FORM2JSON_VLM_BACKEND", cfg["backend"])
     cfg["base_url"] = os.environ.get("FORM2JSON_VLM_URL", cfg["base_url"])
     cfg["model"] = os.environ.get("FORM2JSON_VLM_MODEL", cfg["model"])
@@ -166,13 +169,11 @@ def load_config(path: str | Path | None = None) -> dict:
 def _is_local(url: str) -> bool:
     """Wymaganie projektu: tylko lokalne modele - adres VLM musi być pętlą zwrotną lub siecią prywatną."""
     host = urlparse(url).hostname or ""
-    if host == "localhost":
-        return True
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
+    try:  # nazwa hosta (np. usługa "ollama" w docker-compose) -> wszystkie jej adresy muszą być lokalne
+        ips = {ipaddress.ip_address(a[4][0].split("%")[0]) for a in socket.getaddrinfo(host, None)}
+    except (OSError, ValueError):
         return False
-    return ip.is_loopback or ip.is_private
+    return bool(ips) and all(ip.is_loopback or ip.is_private for ip in ips)
 
 
 def parse_partial(txt: str) -> dict:
@@ -205,7 +206,6 @@ class VLMRefiner:
         self.model = cfg["model"]
         self.key = cfg.get("api_key", "EMPTY")
         self.verify = cfg["ca_bundle"] or bool(cfg["verify_tls"])
-        self.raw: list[dict] = []
         if not _is_local(self.base) and not cfg.get("allow_remote"):
             raise ValueError(f"VLM {self.base} nie jest adresem lokalnym (ustaw allow_remote = true, jeśli to celowe)")
 
@@ -249,16 +249,24 @@ class VLMRefiner:
         except Exception:
             return False
 
+    _tls = threading.local()
+
+    @property
+    def raw(self) -> list[dict]:
+        """Surowe odpowiedzi modelu z ostatniego refine() w bieżącym wątku."""
+        return getattr(self._tls, "raw", [])
+
     # ------------------------------------------------------------ refine
     def refine(self, pages, cands: list[FieldCandidate], native_text: str,
                title_guess: str) -> tuple[str, list[FieldCandidate], str]:
         """Zapytanie per strona (mniejsze modele lepiej radzą sobie z jedną stroną)."""
         res: list[FieldCandidate] = []
-        self.raw = []                      # surowe odpowiedzi modelu (zapisywane w *.fields.json)
+        raw: list[dict] = []               # surowe odpowiedzi modelu (zapisywane w *.fields.json)
+        self._tls.raw = raw                # osobno dla każdego wątku (kilka plików naraz)
         title, addressee = title_guess, ""
+        jobs = []                          # (strona, nr fragmentu, obraz, kandydaci, prompt)
         for page in pages:
             pc = [c for c in cands if c.page == page.index]
-            page_res: list[FieldCandidate] | None = []
             page_text = " ".join(w.text for w in page.words)[:6000]
             for ti, tile in enumerate(_tiles(page.image)):
                 if self.cfg.get("use_candidates"):
@@ -275,21 +283,41 @@ class VLMRefiner:
                 prompt = (f"Tytuł formularza (wstępnie): {title_guess}\nStrona {page.index + 1}.\n\n" + hint
                           + (f"Tekst strony (warstwa tekstowa/OCR, pomocniczo):\n{page_text}\n\n" if page_text else "")
                           + "Zwróć kompletną listę pól tej strony w zadanym schemacie JSON.")
-                t0 = time.time()
-                try:
-                    out = self._chat([tile], prompt)
-                except Exception as e:  # VLM jest opcjonalny - w razie błędu cała strona z geometrii
-                    print(f"  [VLM] strona {page.index + 1}: błąd {e} - używam wyniku geometrii", file=sys.stderr)
-                    page_res = None
-                    break
-                print(f"  [VLM] strona {page.index + 1}.{ti + 1}: {len(out.get('fields', []))} pól, "
-                      f"{time.time() - t0:.1f}s", file=sys.stderr)
-                self.raw.append({"page": page.index, "tile": ti, "response": out})
-                if page.index == 0 and ti == 0:
-                    title = out.get("title") or title
-                    addressee = out.get("addressee") or ""
-                page_res.extend(self._bind(out.get("fields", []), pc, page.index))
-            res.extend(pc if page_res is None else page_res)
+                jobs.append((page.index, ti, tile, pc, prompt))
+
+        def ask(job):
+            pi, ti, tile, _, prompt = job
+            t0 = time.time()
+            try:
+                out = self._chat([tile], prompt)
+            except Exception as e:  # VLM jest opcjonalny - w razie błędu zostają kandydaci z geometrii
+                print(f"  [VLM] strona {pi + 1}: błąd {e} - używam wyniku geometrii", file=sys.stderr)
+                return None
+            print(f"  [VLM] strona {pi + 1}.{ti + 1}: {len(out.get('fields', []))} pól, "
+                  f"{time.time() - t0:.1f}s", file=sys.stderr)
+            return out
+
+        # kilka stron naraz: GPU przetwarza równoległe zapytania wsadowo (Ollama: OLLAMA_NUM_PARALLEL)
+        workers = max(1, int(self.cfg.get("parallel", 1)))
+        if workers > 1 and len(jobs) > 1:
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=workers) as ex:
+                outs = list(ex.map(ask, jobs))
+        else:
+            outs = [ask(j) for j in jobs]
+        # wyniki składamy w kolejności stron - wiązanie z geometrią jest deterministyczne;
+        # błąd choćby jednego kafelka -> cała strona z geometrii (raz), bez mieszania z polami innych kafelków
+        failed = {pi for (pi, *_), out in zip(jobs, outs) if out is None}
+        for (pi, ti, _, pc, _), out in zip(jobs, outs):
+            if pi in failed:
+                if ti == 0:                # kandydaci strony raz, w kolejności stron
+                    res.extend(pc)
+                continue
+            raw.append({"page": pi, "tile": ti, "response": out})
+            if pi == 0 and ti == 0:
+                title = out.get("title") or title
+                addressee = out.get("addressee") or ""
+            res.extend(self._bind(out.get("fields", []), pc, pi))
         return title, res, addressee
 
     @staticmethod

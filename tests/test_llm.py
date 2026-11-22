@@ -64,3 +64,11 @@ def test_remote_vlm_rejected_unless_allowed():
 def test_parse_partial_recovers_complete_fields():
     txt = '{"title": "W", "fields": [{"label": "A", "type": "string"}, {"label": "B", "ty'
     assert [x["label"] for x in llm.parse_partial(txt)["fields"]] == ["A"]
+
+
+def test_docker_service_name_resolving_to_private_ip_is_local(monkeypatch):
+    # deploy/docker-compose.yml: FORM2JSON_VLM_URL=http://ollama:11434 (sieć Dockera, adres prywatny)
+    addrs = {"ollama": "172.18.0.2", "evil.example": "93.184.216.34"}
+    monkeypatch.setattr(llm.socket, "getaddrinfo", lambda h, *_: [(2, 1, 6, "", (addrs[h], 0))])
+    assert llm._is_local("http://ollama:11434")
+    assert not llm._is_local("http://evil.example:11434")
