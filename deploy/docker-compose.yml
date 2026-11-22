@@ -38,6 +38,8 @@ services:
     depends_on:
       ollama:
         condition: service_healthy
+    # bez roota; uid/gid użytkownika hosta, żeby dało się pisać do zamontowanego ./out
+    user: "${UID:-1000}:${GID:-1000}"
     environment:
       # adres nielokalny -> [ollama] manage = auto używa tego kontenera (nie uruchamia własnego serwera)
       FORM2JSON_VLM_URL: "http://ollama:11434"

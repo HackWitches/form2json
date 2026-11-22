@@ -18,16 +18,20 @@ obligatoryjnością i zależnościami (warunki SHOW). Bez GPU pipeline działa b
 from __future__ import annotations
 
 import base64
+import ipaddress
 import json
 import os
+import socket
 import sys
 import threading
 import time
 import tomllib
 from difflib import SequenceMatcher
 from pathlib import Path
+from urllib.parse import urlparse
 
 import cv2
+import jsonschema
 import numpy as np
 import requests
 
@@ -125,7 +129,10 @@ def _tiles(img: np.ndarray) -> list[np.ndarray]:
     step = int(w * 1.414)
     if h <= step * 1.15:
         return [img]
-    return [img[y:min(h, y + step + int(0.05 * step))] for y in range(0, h, step)]
+    ys = list(range(0, h, step))
+    if h - ys[-1] < 0.3 * step:      # ostatni skrawek (np. 28 px) dolicz do poprzedniego kafelka
+        ys.pop()
+    return [img[y:h if y == ys[-1] else min(h, y + step + int(0.05 * step))] for y in ys]
 
 
 DEFAULT_CONFIG = Path(__file__).with_name("config") / "local.toml"
@@ -159,6 +166,16 @@ def load_config(path: str | Path | None = None) -> dict:
     return cfg
 
 
+def _is_local(url: str) -> bool:
+    """Wymaganie projektu: tylko lokalne modele - adres VLM musi być pętlą zwrotną lub siecią prywatną."""
+    host = urlparse(url).hostname or ""
+    try:  # nazwa hosta (np. usługa "ollama" w docker-compose) -> wszystkie jej adresy muszą być lokalne
+        ips = {ipaddress.ip_address(a[4][0].split("%")[0]) for a in socket.getaddrinfo(host, None)}
+    except (OSError, ValueError):
+        return False
+    return bool(ips) and all(ip.is_loopback or ip.is_private for ip in ips)
+
+
 def parse_partial(txt: str) -> dict:
     """JSON z modelu bywa ucięty (limit tokenów przy dużych tabelach) - zachowaj kompletne pola."""
     try:
@@ -189,6 +206,8 @@ class VLMRefiner:
         self.model = cfg["model"]
         self.key = cfg.get("api_key", "EMPTY")
         self.verify = cfg["ca_bundle"] or bool(cfg["verify_tls"])
+        if not _is_local(self.base) and not cfg.get("allow_remote"):
+            raise ValueError(f"VLM {self.base} nie jest adresem lokalnym (ustaw allow_remote = true, jeśli to celowe)")
 
     # ------------------------------------------------------------ transport
     def _chat(self, images: list[np.ndarray], text: str) -> dict:
@@ -217,7 +236,9 @@ class VLMRefiner:
                               headers={"Authorization": f"Bearer {self.key}"}, verify=self.verify)
             r.raise_for_status()
             txt = r.json()["choices"][0]["message"]["content"]
-        return parse_partial(txt)
+        out = parse_partial(txt)
+        jsonschema.validate(out, SCHEMA)     # serwer mógł nie wymusić schematu; błąd -> wynik geometrii dla strony
+        return out
 
 
     def available(self) -> bool:
@@ -284,10 +305,13 @@ class VLMRefiner:
                 outs = list(ex.map(ask, jobs))
         else:
             outs = [ask(j) for j in jobs]
-        # wyniki składamy w kolejności stron - wiązanie z geometrią jest deterministyczne
+        # wyniki składamy w kolejności stron - wiązanie z geometrią jest deterministyczne;
+        # błąd choćby jednego kafelka -> cała strona z geometrii (raz), bez mieszania z polami innych kafelków
+        failed = {pi for (pi, *_), out in zip(jobs, outs) if out is None}
         for (pi, ti, _, pc, _), out in zip(jobs, outs):
-            if out is None:
-                res.extend(pc)
+            if pi in failed:
+                if ti == 0:                # kandydaci strony raz, w kolejności stron
+                    res.extend(pc)
                 continue
             raw.append({"page": pi, "tile": ti, "response": out})
             if pi == 0 and ti == 0:

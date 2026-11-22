@@ -14,7 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 WORKDIR /app
 COPY requirements.txt /app/form2json/requirements.txt
 RUN pip install --no-cache-dir -r /app/form2json/requirements.txt
-COPY . /app/form2json
+RUN useradd --create-home --uid 10001 app
+COPY --chown=app:app . /app/form2json
+USER app
 
 # runtime.config z repozytorium ma ścieżki Windows - w kontenerze wejście/wyjście podaje docker-compose
 ENTRYPOINT ["python", "-m", "form2json"]

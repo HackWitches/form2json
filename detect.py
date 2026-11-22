@@ -337,13 +337,14 @@ class FormDetector:
                     used.add(i)
             r = Region(b, "comb", n_cells=sum(len(p) for p in parts), parts=[len(p) for p in parts])
             prev = comb_regs[-1] if comb_regs else None
-            if prev and len(r.parts) == 1 and abs(prev.box.x0 - b.x0) < 6 * u and abs(prev.box.x1 - b.x1) < 6 * u                     and 0 <= b.y0 - prev.box.y1 < 0.9 * self.line_h                     and not [p for p in self.phrases if prev.box.y1 - 2 <= p.box.cy <= b.y0 + 2
+            if prev and len(r.parts) == 1 and abs(prev.box.x0 - b.x0) < 6 * u and abs(prev.box.x1 - b.x1) < 6 * u \
+                    and 0 <= b.y0 - prev.box.y1 < 0.9 * self.line_h \
+                    and not [p for p in self.phrases if prev.box.y1 - 2 <= p.box.cy <= b.y0 + 2
                              and p.box.h_overlap(b) > 0.2]:
                 prev.box = prev.box.union(b)
                 prev.n_cells += r.n_cells
                 prev.parts = [prev.n_cells]
                 prev.kind = "comb"
-                prev.rows = getattr(prev, "rows", 1) + 1
                 continue
             comb_regs.append(r)
         regs.extend(comb_regs)
@@ -602,8 +603,3 @@ class FormDetector:
             else:
                 obj.section = " > ".join(s for _, s in stack)
 
-
-def detect_page(page: Page) -> tuple[list[FieldCandidate], list[str]]:
-    det = FormDetector(page)
-    fields, heads = det.detect()
-    return fields, [h.text for h in heads]

@@ -1,4 +1,4 @@
-# form2json — konwersja formularzy papierowych do JSON (on-premise, RTX 4090 / CPU)
+# form2json - konwersja formularzy papierowych do JSON (on-premise, GPU / CPU)
 
 Wejście: `PDF, DOC, DOCX, ODS, XLSX, JPG/JPEG, PNG`. Dla każdego pliku powstają:
 
@@ -9,6 +9,10 @@ Wejście: `PDF, DOC, DOCX, ODS, XLSX, JPG/JPEG, PNG`. Dla każdego pliku powstaj
 | `*.form.json` | docelowy **FormDefinition** (`tabs` → `SECTION` → `repeatingSectionGrid`, `flow.links`), zgodny ze schematem `importowanyPlikJsonSchemat.json` i z regułami technicznymi |
 
 Wszystko działa lokalnie: bez zewnętrznych API, bez trenowania modeli.
+Adres VLM musi być lokalny albo z sieci prywatnej (`localhost`, `192.168.x.x`, usługa w sieci Dockera); inny wymaga `allow_remote = true` w `config/local.toml`.
+
+> **Licencja:** PDF czyta PyMuPDF, który jest na AGPL-3.0, a regulamin wyklucza copyleft.
+> Do zastąpienia przez pdfplumber + pypdfium2 (osobny PR).
 
 ## Architektura
 
@@ -55,6 +59,8 @@ plik ─► loaders ─► strony: raster + słowa z pozycjami ─► detect (Op
 
 ## Instalacja (Windows, RTX 4090)
 
+Wymagany Python 3.11+ (`tomllib`).
+
 ```powershell
 python -m venv .venv-form2json
 .venv-form2json\Scripts\python -m pip install -r form2json\requirements.txt
@@ -73,7 +79,7 @@ Najprościej: ustaw ścieżki w `form2json/runtime.config` i uruchom bez paramet
 (w PyCharm/IntelliJ: *Script path* = `form2json\run.py`, bez parametrów i bez katalogu roboczego):
 
 ```powershell
-python form2json\run.py            # albo: python -m form2json   (z katalogu Formularze-Wypakowane)
+python form2json\run.py            # albo: python -m form2json   (z katalogu nadrzędnego form2json)
 python form2json\run.py --fast     # prostszy, szybszy model (profile = fast)
 ```
 
@@ -92,6 +98,11 @@ python form2json\run.py --fast     # prostszy, szybszy model (profile = fast)
 Parametry z linii poleceń mają pierwszeństwo przed `runtime.config` (`--no-report`, `--no-timing`,
 `--profile`, `--vlm-model`, `--runtime-config inny.config`...). Jeśli model wybranego profilu nie jest pobrany
 w Ollamie, program wypisze polecenie `ollama pull` i użyje modelu domyślnego.
+
+> **Uwaga:** model z `runtime.config` (`[model] profile`) ma pierwszeństwo przed zmienną `FORM2JSON_VLM_MODEL`.
+> Przy `[ollama] auto_pull = true` brakujący model jest pobierany automatycznie (około 6 GB).
+> Na zdalnym serwerze przez tunel SSH (np. DGX Spark) podawaj model jawnie i nie uruchamiaj własnej Ollamy:
+> `FORM2JSON_VLM_URL=http://127.0.0.1:18001 python -m form2json --vlm --vlm-model qwen3-vl:30b-a3b-instruct --ollama never ...`
 
 ### Przyspieszenie (RTX 4090, CUDA)
 
@@ -153,8 +164,50 @@ python -m form2json.compare wyniki\plik.pdf.form.json konfiguracja_form_....json
 ```
 
 Konfiguracja VLM: `config/local.toml` (model, adres Ollamy, rozmiar obrazu, kontekst). Zmienne
-`FORM2JSON_VLM_URL` i `FORM2JSON_VLM_MODEL` nadpisują wartości z pliku. Tesseract: modele w
+`FORM2JSON_VLM_URL` i `FORM2JSON_VLM_MODEL` nadpisują wartości z pliku (model: patrz uwaga o `runtime.config`). Tesseract: modele w
 `tessdata/` (`pol` z tessdata_best), zmienne `TESSERACT_CMD`, `TESSDATA_DIR`, `FORM2JSON_OCR_LANG`.
+
+## Testy
+
+```bash
+pip install pytest==9.2.0
+python -m pytest form2json/tests      # z katalogu nadrzędnego (pakiet musi nazywać się form2json)
+```
+
+Pliki formularzy konkursowych (`f1.pdf`, `f5.PDF`, `f5.docx`, referencje COI w `refs/<katalog>/`) trzeba podłożyć w `form2json/tests/fixtures` albo wskazać zmienną `F2J_FIXTURES`.
+Bez nich część testów jest pomijana (`pytest -rs` pokazuje które); katalog `tests/fixtures/` jest w `.gitignore`.
+
+## Wizualizacja
+
+Pokazuje, jak form2json rozpoznał formularz: pola naniesione na strony oryginału, typ, wymagalność, warunki, pola pominięte (dane z bazy, podpis) i podsumowanie.
+Rysuje ją skrypt `dev/visualize_output.py` z repozytorium `cyfryzacja-formularzy` (ten sam, którym ogląda się wyniki `service`), więc oba rozwiązania można porównać obok siebie.
+Gotowe wizualizacje dla 9 formularzy (VLM na DGX Spark): `docs/wizualizacje/NN_wynik.pdf`, statystyki: `docs/STATYSTYKI.md`.
+
+Wymagania:
+
+- `form2json` i `cyfryzacja-formularzy` w jednym katalogu nadrzędnym;
+- pliki wejściowe nazwane `01.pdf` ... `09.pdf` (skrypt bierze PDF i numerację linii z `cyfryzacja-formularzy/annotations/forms/NN_*.json`), tylko PDF;
+- środowisko z `pdfplumber` i `Pillow`, np. `cyfryzacja-formularzy/service/.venv`.
+
+```bash
+# 1. rozpoznanie (z VLM albo --no-vlm)
+python -m form2json <katalog z 01.pdf ... 09.pdf> -o form2json/wyniki --no-report
+
+# 2. wynik form2json -> kontrakt v2 z service (form2json/wyniki/kontrakt/NN.json)
+python -m form2json.contract_v2 form2json/wyniki --service cyfryzacja-formularzy/service
+
+# 3. wizualizacja -> form2json/wyniki/viz/NN_wynik.pdf, NN_pageK.png, NN_podsumowanie.png
+cd cyfryzacja-formularzy
+service/.venv/bin/python dev/visualize_output.py 01 02 03 04 05 06 07 08 09 \
+  --in ../form2json/wyniki/kontrakt --out ../form2json/wyniki/viz
+
+# opcjonalnie: ta sama miara co dla service (anotacje zespołu)
+python3 eval/porownaj.py ../form2json/wyniki/kontrakt
+```
+
+Adapter `contract_v2.py` przypisuje polu linie tekstu, które przecina jego ramka.
+Pola dodane przez VLM bez ramki z geometrii są przypinane do linii po tekście opisu, więc ich położenie na rysunku jest przybliżone.
+Pola wnioskodawcy (imię, adres, PESEL, kontakt) trafiają do "pominiete: dane bazy", tak jak w `service`, bo pochodzą z bazy formularza.
 
 ## Moduły
 
@@ -167,13 +220,18 @@ Konfiguracja VLM: `config/local.toml` (model, adres Ollamy, rozmiar obrazu, kont
 | `llm.py` | lokalny VLM (Ollama) z wymuszonym schematem JSON |
 | `semantic.py` | role, obligatoryjność, zależności, adresat, typ wnioskodawcy |
 | `build.py` | FormDefinition zgodny ze standardem i regułami |
-| `validate.py` | walidacja schematu i reguł |
+| `validate.py` | walidacja schematu i reguł (oficjalny schemat + ścisły `config/formDefinition.strict.schema.json`) |
 | `compare.py`, `show.py` | ocena względem referencji, podgląd |
+| `cli.py`, `run.py`, `runtime.py` | linia poleceń, uruchamianie skryptem, `runtime.config` |
+| `ollama_server.py` | własny serwer Ollama z przyspieszeniem (`[ollama] manage`) |
+| `report.py` | raport zbiorczy `RAPORT.md` |
+| `contract_v2.py` | wynik -> kontrakt v2 z `service` (wizualizacja, wspólna ewaluacja) |
 
 ## Wyniki na materiałach konkursowych (RTX 4090, qwen3-vl:8b-instruct)
 
 * 9 formularzy × wszystkie dostępne formaty = **69 plików, 69/69 FormDefinition bez błędów walidacji**
   (schemat JSON + reguły techniczne). Pełna tabela: `wyniki/RAPORT.md`.
+  Pomiar sprzed ścisłego walidatora; oficjalny schemat przepuszczał nawet pusty obiekt `{}`.
 * Porównanie z plikami referencyjnymi (`python -m form2json.compare`):
 
 | formularz | recall (cały formularz) | recall: przedmiot wniosku | zgodność typów |
@@ -181,9 +239,23 @@ Konfiguracja VLM: `config/local.toml` (model, adres Ollamy, rozmiar obrazu, kont
 | Wniosek o ustalenie numeru porządkowego nieruchomości | 91% | 100% | 98% |
 | Wniosek o stwierdzenie nadpłaty podatku | 84% | 71% | 98% |
 
-  Wynik jest jednakowy dla PDF / DOC / DOCX / ODS / XLSX / JPG / PNG tego samego formularza.
-* Czas: ~10–20 s na stronę (LibreOffice + OCR + VLM). Bez GPU (`--no-vlm`) kilka sekund na plik,
+  Z VLM wynik jest jednakowy dla PDF / DOC / DOCX / ODS / XLSX / JPG / PNG tego samego formularza.
+  Bez VLM skany (JPG/PNG) dają mniej pól niż PDF/Office (formularz 5: 9-10 zamiast 12).
+* Czas: około 10-20 s na stronę (LibreOffice + OCR + VLM). Bez GPU (`--no-vlm`) kilka sekund na plik,
   ale z gorszymi etykietami pól („w kwocie” zamiast „Kwota nadpłaty”).
 * Zabezpieczenia: wysokie skany (kilka stron w jednym obrazie) są dzielone na strony A4; ucięty JSON z
   modelu jest odzyskiwany do ostatniego pełnego pola; powtórzenia pól z „pętli” modelu są usuwane;
   role z VLM są weryfikowane regułami (np. „Termin wynajęcia od” nie jest datą złożenia wniosku).
+
+## Wyniki na DGX Spark (qwen3-vl:30b-a3b-instruct, Ollama Q4)
+
+Pomiar 22.11.2026 na 9 formularzach PDF i skanach formularzy 1 i 5; pełne tabele i porównanie z `service`: `docs/STATYSTYKI.md`.
+
+| formularz | recall (cały formularz) | recall: przedmiot wniosku |
+|---|---|---|
+| Wniosek o ustalenie numeru porządkowego nieruchomości | 62% | 100% |
+| Wniosek o stwierdzenie nadpłaty podatku | 84% | 71% |
+
+Formularz 1 traci około 25 punktów, bo model zamienia "imię i nazwisko/nazwa wnioskodawcy" na "Imię i nazwisko" i znika wariant "firma" (bez VLM ten sam formularz ma 89%).
+Wynik jest taki sam dla PDF, DOCX, JPG i PNG.
+Czas: 41 stron po kolei w 567 s (średnio 13,8 s na stronę); z równoległym VLM (`vlm_parallel = 4`, `file_workers = 2`) 9 stron w 96 s (10,7 s na stronę).

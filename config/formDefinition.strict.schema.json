@@ -1,0 +1,76 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "FormDefinition (form2json, strict)",
+  "$comment": "Uzupełnia oficjalny importowanyPlikJsonSchemat.json (który nie ma required/additionalProperties i ma literówkę repetingSectionGrid). Zgodny z referencjami konfiguracja_form_*.json.",
+  "type": "object",
+  "required": ["title", "tabs", "flow"],
+  "additionalProperties": false,
+  "properties": {
+    "title": {"type": "string", "minLength": 1, "maxLength": 255},
+    "tabs": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/tab"}},
+    "flow": {
+      "type": "object", "required": ["links"], "additionalProperties": false,
+      "properties": {"links": {"type": "array", "items": {
+        "type": "object", "required": ["id", "source", "target"], "additionalProperties": false,
+        "properties": {"id": {"type": "string"}, "source": {"type": "string"}, "target": {"type": "string"}}}}}
+    }
+  },
+  "$defs": {
+    "tab": {
+      "type": "object", "required": ["id", "title", "type", "questions"], "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"}, "title": {"type": "string", "minLength": 1},
+        "type": {"enum": ["MAIN", "FINISH"]},
+        "questions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/cell"}}
+      }
+    },
+    "cell": {
+      "type": "object", "required": ["x", "y", "rows", "cols", "field"], "additionalProperties": false,
+      "properties": {
+        "x": {"type": "integer"}, "y": {"type": "integer"}, "rows": {"type": "integer"}, "cols": {"type": "integer"},
+        "minItemRows": {"type": "integer"}, "field": {"$ref": "#/$defs/field"}
+      }
+    },
+    "field": {
+      "type": "object",
+      "required": ["id", "type", "techName", "title", "description", "options", "validation", "readOnly",
+                   "repeatingSectionGrid", "questionOrder", "tooltipMessage"],
+      "additionalProperties": false,
+      "properties": {
+        "id": {"type": "string"},
+        "type": {"enum": ["SECTION", "REPEATING_SECTION", "TEXT_FIELD", "TEXTAREA", "NUMBER", "DATEPICKER", "RADIO",
+                          "CHECKBOX", "SELECT", "FILE_UPLOADER", "CONSENT_SECTION", "TEXT_BLOCK", "INFO_SECTION"]},
+        "techName": {"type": "string", "pattern": "^[a-z0-9_]+$"},
+        "title": {"type": "string"},
+        "description": {"type": "string"},
+        "options": {"type": "array", "items": {
+          "type": "object", "required": ["id", "name"], "additionalProperties": false,
+          "properties": {"id": {"type": "string"}, "name": {"type": "string", "minLength": 1}, "techName": {"type": "string"}}}},
+        "validation": {"oneOf": [
+          {"type": "array", "uniqueItems": true, "items": {"enum": ["REQUIRED", "EMAIL", "PESEL", "NIP", "REGON", "ZIP_CODE",
+                                                                   "EPUAP", "ADE", "SERIAL_NUMBER_ID_CARD"]}},
+          {"type": "object", "maxProperties": 0}]},
+        "readOnly": {"type": "boolean"},
+        "repeatingSectionGrid": {"type": "array", "items": {"$ref": "#/$defs/cell"}},
+        "states": {"type": "array", "items": {
+          "type": "object", "required": ["type", "query"], "additionalProperties": false,
+          "properties": {"type": {"enum": ["SHOW", "READ_ONLY"]}, "query": {"type": "string", "minLength": 1}}}},
+        "questionOrder": {"type": "integer"},
+        "tooltipMessage": {"type": "string"},
+        "defaultValue": {"type": ["string", "array"]},
+        "defaultValueType": {"enum": ["EXTERNAL_SYSTEM"]},
+        "dictionaryName": {"type": "string"},
+        "multiLevelTree": {"type": "boolean"},
+        "searchEnabled": {"type": "boolean"},
+        "selectAllEnabled": {"type": "boolean"},
+        "consentSectionConfig": {
+          "type": "object", "required": ["consents"],
+          "properties": {
+            "consents": {"type": "array", "minItems": 1, "items": {
+              "type": "object", "required": ["description"],
+              "properties": {"description": {"type": "string"}, "required": {"type": "boolean"}}}},
+            "required": {"type": "boolean"}, "files": {"type": "array"}}}
+      }
+    }
+  }
+}

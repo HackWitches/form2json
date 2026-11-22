@@ -17,6 +17,7 @@ Kolejne kroki main(): parse_args -> resolve_settings -> setup_ocr -> setup_vlm -
 from __future__ import annotations
 
 import argparse
+import glob
 import json
 import sys
 import threading
@@ -85,6 +86,12 @@ class RunStats:
         return time.perf_counter() - self.started
 
 
+def _dpi(v: str) -> int:
+    if not 72 <= int(v) <= 600:
+        raise argparse.ArgumentTypeError("dpi musi być w zakresie 72-600")
+    return int(v)
+
+
 def parse_args(argv=None) -> argparse.Namespace:
     ap = argparse.ArgumentParser(prog="form2json", description="Formularze PDF/DOC/DOCX/ODS/XLSX/JPG/PNG -> JSON")
     ap.add_argument("inputs", nargs="*", help="pliki/katalogi (domyślnie [paths] input z runtime.config)")
@@ -100,7 +107,7 @@ def parse_args(argv=None) -> argparse.Namespace:
     ap.add_argument("--rebuild", action="store_true", help="wejście: *.fields.json - przebuduj tylko *.form.json")
     ap.add_argument("--config", default=None, help="plik konfiguracji VLM (domyślnie config/local.toml)")
     ap.add_argument("--tabs", default=None, choices=["auto", "single"])
-    ap.add_argument("--dpi", type=int, default=None)
+    ap.add_argument("--dpi", type=_dpi, default=None)
     ap.add_argument("--vlm-parallel", type=int, default=None, help="ile stron naraz do VLM")
     ap.add_argument("--workers", type=int, default=None, help="ile plików przetwarzać naraz")
     ap.add_argument("--ollama", choices=["auto", "always", "never"], default=None,
@@ -221,8 +228,9 @@ def iter_inputs(paths: list[str], exclude: Path | None = None):
             yield from sorted(q for q in p.rglob("*") if q.suffix.lower() in SUPPORTED
                               and not (ex and ex in q.resolve().parents)
                               and "wizualizacja" not in q.name.lower()      # gotowe wizualizacje, nie formularze
+                              # wykluczenia tylko wewnątrz podanego katalogu, nie w jego przodkach
                               and not any(x.name in ("form2json", ".venv") or x.name.startswith("wyniki")
-                                          for x in q.parents))
+                                          for x in q.relative_to(p).parents))
         elif p.suffix.lower() in SUPPORTED:
             yield p
 
@@ -230,11 +238,23 @@ def iter_inputs(paths: list[str], exclude: Path | None = None):
 def collect_inputs(s: Settings) -> list[Path]:
     s.out.mkdir(parents=True, exist_ok=True)
     if s.rebuild:      # --rebuild: istniejące *.fields.json (bez OCR/VLM)
-        files = sorted(Path(x) for pat in s.inputs for x in (Path().glob(pat) if "*" in pat else [pat]))
+        files = sorted(Path(x) for pat in s.inputs for x in (glob.glob(pat) if glob.has_magic(pat) else [pat]))
     else:
         files = list(iter_inputs(s.inputs, s.out))
     print(f"Plików do rozpoznania: {len(files)}")
     return files
+
+
+def unique_names(files: list[Path], rebuild: bool) -> tuple[list[Path], int]:
+    """Ta sama nazwa w dwóch katalogach nadpisałaby wyniki - drugi plik pomijamy z błędem."""
+    seen: dict[str, Path] = {}
+    for p in files:
+        name = p.name.removesuffix(".fields.json") if rebuild else p.name
+        if name in seen:
+            print(f"[ERR] {p}: nazwa wyniku koliduje z {seen[name]} - pomijam", file=sys.stderr)
+        else:
+            seen[name] = p
+    return list(seen.values()), len(files) - len(seen)
 
 
 # ---------------------------------------------------------------- przetwarzanie
@@ -369,14 +389,17 @@ def main(argv=None) -> int:
     vlm, rc = setup_vlm(settings)
     if rc:
         return rc
-    files = collect_inputs(settings)
+    files, dups = unique_names(collect_inputs(settings), settings.rebuild)
+    if not files:
+        print("Brak plików wejściowych o obsługiwanych rozszerzeniach", file=sys.stderr)
+        return 2
     stats = process_files(files, settings, ocr, vlm)
     sm = summarize(stats)
     if settings.timing:
         print_summary(sm)
     if settings.report:
         make_report(settings, sm if settings.timing else None)
-    return 0 if sm["files_err"] == 0 else 1
+    return 0 if sm["files_err"] == 0 and not dups else 1
 
 
 if __name__ == "__main__":

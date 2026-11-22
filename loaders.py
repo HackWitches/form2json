@@ -37,7 +37,10 @@ DEFAULT_DPI = 150
 def imread_unicode(path: str | Path) -> np.ndarray:
     """cv2.imread nie obsługuje polskich znaków w ścieżce na Windows."""
     data = np.fromfile(str(path), dtype=np.uint8)
-    img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    try:
+        img = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    except cv2.error as e:       # m.in. przekroczony OPENCV_IO_MAX_IMAGE_PIXELS (__init__.py)
+        raise ValueError(f"Nie mogę odczytać obrazu (za duży lub uszkodzony): {path}") from e
     if img is None:
         raise ValueError(f"Nie mogę odczytać obrazu: {path}")
     return img
@@ -67,7 +70,10 @@ def office_to_pdf(path: Path, outdir: Path) -> Path:
     profile = Path(tempfile.mkdtemp(prefix="lo_profile_"))
     cmd = [soffice, f"-env:UserInstallation={profile.as_uri()}", "--headless",
            "--convert-to", "pdf", "--outdir", str(outdir), str(path)]
-    subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+    try:
+        subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=180)
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
     out = outdir / (path.stem + ".pdf")
     if not out.exists():
         raise RuntimeError(f"LibreOffice nie wygenerował PDF dla {path}")
@@ -107,7 +113,7 @@ def native_text(path: Path) -> str:
             return "\n".join(out)
         if ext == ".ods":
             from odf.opendocument import load
-            from odf import text as odftext, table as odftable
+            from odf import table as odftable
             from odf.element import Element
             doc = load(str(path))
             out = []
@@ -168,12 +174,20 @@ def _pdf_words(page, scale: float) -> list[Word]:
     return words
 
 
+MAX_PIXELS = 80_000_000      # jak OPENCV_IO_MAX_IMAGE_PIXELS w __init__.py
+MAX_PAGES = 50
+
+
 def load_pdf(path: Path, dpi: int, ocr=None) -> list[Page]:
     import fitz  # PyMuPDF
     pages = []
     scale = dpi / 72.0
     with fitz.open(str(path)) as doc:
+        if doc.page_count > MAX_PAGES:
+            raise ValueError(f"{path}: {doc.page_count} stron (limit {MAX_PAGES})")
         for i, p in enumerate(doc):
+            if p.rect.width * p.rect.height * scale * scale > MAX_PIXELS:
+                raise ValueError(f"{path}: strona {i + 1} za duża do renderowania w {dpi} dpi")
             pix = p.get_pixmap(dpi=dpi, alpha=False)
             img = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w, pix.n)
             img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR if pix.n == 3 else cv2.COLOR_GRAY2BGR)
@@ -233,7 +247,7 @@ def load_image(path: Path, ocr) -> list[Page]:
     # Szacujemy DPI zakładając szerokość A4 (8.27 cala) - tylko do progów geometrii.
     dpi = max(72, int(round(img.shape[1] / 8.27)))
     if ocr is None:
-        raise RuntimeError("Obraz wymaga OCR - podaj --ocr paddle|tesseract|doctr")
+        raise RuntimeError("Obraz wymaga OCR - podaj --ocr tesseract|paddle|paddle-cpu")
     return [Page(i, p, dpi, ocr(p), f"ocr:{ocr.name}") for i, p in enumerate(split_pages(img))]
 
 

@@ -13,6 +13,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .detect import LEADER_RE
 from .model import Box, Word
 
 
@@ -108,7 +109,8 @@ class TesseractBackend:
         d = self.t.image_to_data(gray, lang=self.lang, config=self.config, output_type=self.t.Output.DICT)
         out = []
         for i, txt in enumerate(d["text"]):
-            if txt.strip() and float(d["conf"][i]) > 30:
+            # wykropkowania "......" Tesseract zwraca z pewnością 0-30, a to z nich powstają pola "dots"
+            if txt.strip() and (float(d["conf"][i]) > 30 or LEADER_RE.search(txt)):
                 x, y, ww, hh = (d[c][i] / k for c in ("left", "top", "width", "height"))
                 out.append(Word(txt, Box(x, y, x + ww, y + hh), size=hh, conf=float(d["conf"][i]) / 100))
         return out

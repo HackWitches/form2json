@@ -15,6 +15,7 @@ from .typing_rules import SIMPLE_TYPE, infer_type, norm
 PUNCT_RE = re.compile(r"^[\s\W\d]*$")
 
 MULTI_RE = re.compile(r"mozna zaznaczyc (kilka|wiele)|wielokrotn|zaznacz wszystkie|kilka odpowiedzi")
+TITLE_RE = re.compile(r"^(wniosek|deklaracja|zgloszenie|oswiadczenie|zawiadomienie|informacja)\b")
 
 
 def strip_numbering(s: str) -> str:
@@ -26,11 +27,20 @@ def strip_numbering(s: str) -> str:
 def guess_title(doc: Document, dets: list[FormDetector]) -> str:
     if dets and dets[0].words:
         d = dets[0]
-        top = [Phrase(ln) for ln in d.lines if ln[0].box.cy < 0.45 * d.page.width * 1.414]
+        top = [Phrase(ln) for ln in d.lines if ln[0].box.cy < 0.45 * d.page.height]
+        for i, p in enumerate(top):
+            if TITLE_RE.match(norm(p.text)):
+                t = p.text
+                for q in top[i + 1:i + 3]:   # tytuł złamany na 2-3 linie: "WNIOSEK" / "o" / "wynajęcie świetlicy"
+                    if len(t.split()) >= 4:
+                        break
+                    t = f"{t} {q.text}"
+                return t.capitalize() if p.text.isupper() else t
         top = [p for p in top if len(p.text) > 8 and not NUMBERING_RE.match(p.text)]
         if top:
+            body = float(np.median([w.size or w.box.h for w in d.words]))   # ta sama miara co Phrase.size
             best = max(top, key=lambda p: (p.size, p.bold))
-            if best.size > 1.2 * d.line_h:
+            if best.size > 1.2 * body:
                 return best.text
     return Path(doc.path).stem
 
@@ -99,7 +109,9 @@ def merge_continuations(fields: list[FieldCandidate], line_h_by_page: dict[int, 
     for f in fields:
         p = out[-1] if out else None
         lh = line_h_by_page.get(f.page, 20)
-        if p and p.page == f.page and p.label == f.label and p.detector in ("dots", "underline")                 and f.detector in ("dots", "underline") and 0 <= f.bbox[1] - p.bbox[3] < 2.5 * lh                 and f.bbox[0] <= p.bbox[0] + 5:
+        if p and p.page == f.page and p.label == f.label and p.detector in ("dots", "underline") \
+                and f.detector in ("dots", "underline") and 0 <= f.bbox[1] - p.bbox[3] < 2.5 * lh \
+                and f.bbox[0] <= p.bbox[0] + 5:
             p.bbox = [min(p.bbox[0], f.bbox[0]), p.bbox[1], max(p.bbox[2], f.bbox[2]), f.bbox[3]]
             if p.type == "string":
                 p.type = "textarea"
@@ -121,6 +133,9 @@ def reanalyze(g: dict) -> dict:
     from dataclasses import fields as dc_fields
     names = {x.name for x in dc_fields(FieldCandidate)}
     fs = [FieldCandidate(**{k: v for k, v in f.items() if k in names}) for f in g["fields"]]
+    for f in fs:          # rolę i obligatoryjność z reguł liczymy od nowa; z VLM zostają (jak w extract)
+        if "vlm" not in f.detector:
+            f.role, f.required = "", None
     assign_roles(fs)
     assign_dependencies(fs)
     assign_required(fs)
@@ -141,8 +156,8 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
         fs, heads = det.detect()
         # sekcja kontynuowana z poprzedniej strony
         for f in fs:
-            if carry and (not f.section or not heads or f.bbox[1] < heads[0].box.y0):
-                f.section = carry if not f.section else f.section
+            if carry and not f.section:
+                f.section = carry
         if fs:
             carry = fs[-1].section or carry
         fields.extend(fs)
@@ -158,8 +173,7 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
 
     if vlm is not None:
         vtitle, fields, vlm_addr = vlm.refine(doc.pages, fields, doc.native_text, title)
-        good = re.compile(r"^(wniosek|deklaracja|zgloszenie|oswiadczenie|zawiadomienie|informacja)")
-        if good.match(norm(vtitle)) and not good.match(norm(title)):
+        if TITLE_RE.match(norm(vtitle)) and not TITLE_RE.match(norm(title)):
             title = vtitle
         addressee = addressee or vlm_addr
         used_vlm = True
@@ -171,6 +185,9 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
             if f.type in ("string", "address") and t not in ("string", "textarea"):
                 f.type, f.address_part = t, f.address_part or part
     # odrzuć śmieci: same znaki, przypisy ("* niepotrzebne skreślić"), etykieta = nagłówek sekcji
+    for f in fields:          # "* NIP" (gwiazdka odnośnika przed krótką etykietą z OCR) -> "NIP"
+        if re.fullmatch(r"\s*\*+\s*\S+(\s+\S+){0,2}", f.label):
+            f.label = f.label.lstrip(" *")
     fields = [f for f in fields if f.label.strip() and not PUNCT_RE.match(f.label)
               and not re.match(r"^\s*\*", f.label) and "niepotrzebne skresl" not in norm(f.label)
               and not (f.section and f.type not in ("radio", "checkbox") and "vlm" not in f.detector
@@ -190,10 +207,5 @@ def extract(path: str | Path, ocr=None, vlm=None, dpi: int = 150) -> dict:
         "sections": sections,
         **({"vlm": {"model": vlm.model, "raw": vlm.raw}} if used_vlm else {}),
         "fields": [f.to_dict() for f in fields],
-        # Widok uproszczony: "Opis pola" -> "Rodzaj pola"
-        "simple": [{"Opis pola": f.label, "Rodzaj pola": SIMPLE_TYPE.get(f.type, f.type),
-                    "Rodzaj szczegółowy": f.type, "Rola": f.role, "Wymagane": bool(f.required),
-                    **({"Opcje": f.options} if f.options else {}),
-                    **({"Zależy od": f"{f.depends_on} = {f.depends_value}"} if f.depends_on else {}),
-                    **({"Sekcja": f.section} if f.section else {})} for f in fields],
+        "simple": simple_view(fields),      # widok uproszczony: "Opis pola" -> "Rodzaj pola"
     }

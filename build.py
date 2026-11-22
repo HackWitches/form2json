@@ -13,9 +13,12 @@ Zgodność z "Reguły techniczne konfiguracji formularzy" + "Standardy i dobre p
 """
 from __future__ import annotations
 
+import json
 import re
 import uuid
 from collections import OrderedDict
+from difflib import SequenceMatcher
+from html import escape
 
 from .typing_rules import norm
 
@@ -51,7 +54,13 @@ def tech(s: str) -> str:
 
 
 def html(s: str) -> str:
-    return f"<html><head></head><body><p>{s}</p></body></html>" if s else ""
+    """Tekst (z dokumentu lub VLM) w otoczce HTML; znaki <, >, & są escapowane."""
+    return f"<html><head></head><body><p>{escape(s, quote=False)}</p></body></html>" if s else ""
+
+
+def tab_title(s: str) -> str:
+    """Tytuł strony trafia do JSONaty w apostrofach, a JSONata nie ma sekwencji \\' - zamieniamy ' na ’."""
+    return s.replace("'", "\u2019").replace("\\", "/")
 
 
 class _Names:
@@ -70,6 +79,7 @@ class _Names:
 LEMMA = {"miejscowosci": "Miejscowość", "ulicy": "Ulica", "obrebie": "Obręb", "gminie": "Gmina",
          "kwocie": "Kwota", "terminie": "Termin", "dniu": "Data", "dnia": "Data", "powiecie": "Powiat",
          "wojewodztwie": "Województwo", "celu": "Cel", "zwiazku z": "Uzasadnienie", "wysokosci": "Wysokość"}
+ACRONYMS = {"nip", "pesel", "regon", "krs", "iban", "epuap", "ceidg", "teryt"}     # "NIP" nie staje się "Nip"
 PREP_RE = re.compile(r"^(w|we|przy|na|z|ze|do|od|o|po|dla|w zwiazku z)\s+(.+)$")
 
 
@@ -82,7 +92,7 @@ def clean_title(s: str) -> str:
     s = re.sub(r"^\s*((\d{1,2}(\.\d{1,2})*\.?)|([IVX]{1,4}\.)|([A-H](\.\d)*\.?))\s+", "", s)
     s = re.sub(r"\s*\((?:postaw|zaznacz|należy|wypełnić|dot\.|opcjonaln)[^)]*\)?", "", s, flags=re.I)
     s = re.sub(r"[\s.…_:*]+$", "", s.strip())
-    s = s[:1].upper() + s[1:] if s.isupper() is False else s.capitalize()
+    s = s.capitalize() if s.isupper() and norm(s) not in ACRONYMS else s[:1].upper() + s[1:]
     return s.strip()[:255]
 
 
@@ -136,7 +146,7 @@ class FormBuilder:
             rows = len(s["repeatingSectionGrid"]) + 1
             questions.append({"x": 0, "y": y, "rows": rows, "cols": 3, "field": s})
             y += rows
-        t = {"id": str(uuid.uuid4()), "title": title, "type": ttype, "questions": questions}
+        t = {"id": str(uuid.uuid4()), "title": tab_title(title), "type": ttype, "questions": questions}
         if questions:
             self.tabs.append(t)
         return t
@@ -144,7 +154,8 @@ class FormBuilder:
     # ------------------------------------------------------------ jsonata
     @staticmethod
     def q_answer(tab: str, sec: str, fld: str, value: str, negate: bool = False) -> str:
-        base = (f"\"{value}\" in tabs['{tab}' in title].questions['{sec}' in field.techName]"
+        base = (f"{json.dumps(value, ensure_ascii=False)} in tabs['{tab_title(tab)}' in title]"
+                f".questions['{sec}' in field.techName]"
                 f".field.repeatingSectionGrid['{fld}' in field.techName].field.__userAnswer")
         return f"$not({base})" if negate else f"({base})"
 
@@ -207,18 +218,18 @@ def subject_field(b: FormBuilder, f: dict) -> dict:
     if f.get("prefilled"):
         out["defaultValue"] = f["prefilled"]
     nl = norm(lab)
-    if ftype == "TEXT_FIELD":     # walidatory z treści etykiety
+    if ftype == "TEXT_FIELD":     # walidatory z treści etykiety (najwyżej jeden walidator formatu)
         for rx, v in ((r"epuap", "EPUAP"), (r"e-?doreczen", "ADE"), (r"dowod(u)? osobist|seria i numer dowodu",
                                                                        "SERIAL_NUMBER_ID_CARD"),
-                      (r"pesel", "PESEL"), (r"nip", "NIP"), (r"regon", "REGON"),
+                      (r"\bpesel\b", "PESEL"), (r"\bnip\b", "NIP"), (r"\bregon\b", "REGON"),
                       (r"e-?mail", "EMAIL"), (r"kod pocztowy", "ZIP_CODE")):
-            if re.search(rx, nl) and v not in out["validation"]:
+            if re.search(rx, nl) and not set(out["validation"]) - {"REQUIRED"}:
                 out["validation"].append(v)
     return out
 
 
-def collapse_repeats(fs: list[dict]) -> tuple[list[dict], bool]:
-    """Ten sam układ pól powtórzony w tabeli (np. długość/szerokość/razem x5) -> sekcja powtarzająca się."""
+def collapse_repeats(fs: list[dict]) -> tuple[list[dict], list[dict], list[dict]]:
+    """Ten sam układ pól powtórzony w tabeli (np. długość/szerokość/razem x5) -> (pola przed, wzorzec wiersza, pola po)."""
     labs = [norm(f["label"]) for f in fs]
     n = len(labs)
     for k in range(1, n // 2 + 1):
@@ -227,9 +238,9 @@ def collapse_repeats(fs: list[dict]) -> tuple[list[dict], bool]:
             r = 1
             while labs[start + r * k:start + (r + 1) * k] == pat:
                 r += 1
-            if r >= 2 and r * k >= 4:
-                return fs[:start] + fs[start:start + k] + fs[start + r * k:], True
-    return fs, False
+            if r >= 2 and r * k >= 4 and set(pat) != {"pole"}:    # "Pole" = pole bez rozpoznanej etykiety
+                return fs[:start], fs[start:start + k], fs[start + r * k:]
+    return fs, [], []
 
 
 def _dedupe(fs: list[dict]) -> list[dict]:
@@ -278,7 +289,7 @@ def to_form_definition(generic: dict, tabs_mode: str = "auto") -> dict:
             if re.search(r"\bimie\b|nazwisk|pesel|^wnioskodawca$|nazwa|\bnip\b|\bregon\b|\bkrs\b", lab):
                 continue
             ff = subject_field(b, f)
-            if re.search(r"dowod|seria", lab):
+            if re.search(r"dowod|seria", lab) and "SERIAL_NUMBER_ID_CARD" not in ff["validation"]:
                 ff["validation"].append("SERIAL_NUMBER_ID_CARD")
             extra_me.append(ff)
     s_me = b.section("Twoje dane", [
@@ -325,7 +336,7 @@ def to_form_definition(generic: dict, tabs_mode: str = "auto") -> dict:
     op_q = b.show(b.q_answer(T1, sec_op_tech, "czy_zlozenie_pelnomocnictwa_wymaga_oplaty_skarbowej", "Tak"))
     sections1.append(b.section("Opłata skarbowa", [
         b.field("RADIO", "Czy złożenie pełnomocnictwa wymaga opłaty skarbowej?", options=["Tak", "Nie"]),
-        b.field("TEXT_BLOCK", "", "oplata_info", required=False, description=OPLATA_HTML.format(title=title),
+        b.field("TEXT_BLOCK", "", "oplata_info", required=False, description=OPLATA_HTML.format(title=escape(title)),
                 states=op_q),
         b.field("FILE_UPLOADER", "Plik z potwierdzeniem przelewu", states=op_q)],
         tech_name=sec_op_tech, states=st_inna,
@@ -334,7 +345,7 @@ def to_form_definition(generic: dict, tabs_mode: str = "auto") -> dict:
     if ent["company"]:      # Opłata skarbowa (wersja 2): pełnomocnik osoby prawnej
         sections1.append(b.section("Opłata skarbowa za pełnomocnictwo", [
             b.field("TEXT_BLOCK", "", "oplata_info_podmiot", required=False,
-                    description=OPLATA_HTML.format(title=title).replace("zamieszkania osoby, która udzieliła",
+                    description=OPLATA_HTML.format(title=escape(title)).replace("zamieszkania osoby, która udzieliła",
                                                                         "siedziby podmiotu, który udzielił")),
             b.field("FILE_UPLOADER", "Plik z potwierdzeniem przelewu", "plik_z_potwierdzeniem_przelewu_podmiot")],
             states=b.show(q(OPR), b.q_answer(T1, S_POD, F_JAKO, "Pełnomocnik"))))
@@ -373,8 +384,13 @@ def to_form_definition(generic: dict, tabs_mode: str = "auto") -> dict:
         subj_tabs.append(("Informacje o wniosku", [(leaf or top, fs, "") for top, secs in groups.items()
                                                     for leaf, fs in secs.items()]))
     built_subject = []
-    for ti, (tab_title, secs) in enumerate(subj_tabs):
-        tab_title = tab_title[:80]
+    used_titles = {T1, "Kontakt i zgody", "Strona końcowa"}
+    for ti, (raw_title, secs) in enumerate(subj_tabs):
+        tab_t = base_t = tab_title(raw_title[:80])
+        k = 2
+        while tab_t in used_titles:          # JSONata adresuje strony po tytule - tytuły muszą być unikalne
+            tab_t, k = f"{base_t} ({k})", k + 1
+        used_titles.add(tab_t)
         sections = []
         merged: "OrderedDict[tuple, list[dict]]" = OrderedDict()
         for sec_title, fs, variant in secs:
@@ -387,13 +403,15 @@ def to_form_definition(generic: dict, tabs_mode: str = "auto") -> dict:
                                                         options=vs)], tech_name="rodzaj_wniosku")
             sections.append((vsec, []))
         for (variant, sec_title), fs in merged.items():
-            fs, rep = collapse_repeats(_dedupe(fs))
-            built = [subject_field(b, f) for f in fs]
             title_s = sec_title if not variant else (variant if sec_title == "Szczegóły wniosku"
                                                      else f"{sec_title} ({variant})")
-            st = b.show(b.q_answer(tab_title[:80], "rodzaj_wniosku", "wybierz_rodzaj_wniosku", variant))                 if variant else None
-            sec = b.section(title_s[:120], built, repeating=rep, states=st)
-            sections.append((sec, fs))
+            st = b.show(b.q_answer(tab_t, "rodzaj_wniosku", "wybierz_rodzaj_wniosku", variant)) if variant else None
+            # najpierw wykryj powtórzenia, potem usuń duplikaty (odwrotnie _dedupe zjada powtórzone wiersze)
+            for part, rep in zip(collapse_repeats(fs), (False, True, False)):
+                part = _dedupe(part)
+                if part:
+                    sec = b.section(title_s[:120], [subject_field(b, f) for f in part], repeating=rep, states=st)
+                    sections.append((sec, part))
         # zależności (SHOW) w obrębie strony
         by_label = {}
         for sec, fs in sections:
@@ -407,15 +425,17 @@ def to_form_definition(generic: dict, tabs_mode: str = "auto") -> dict:
                 if dep and norm(dep) in by_label:
                     psec, pf = by_label[norm(dep)]
                     if psec["type"] == "SECTION" and pf is not g["field"]:
-                        g["field"]["states"] = b.show(b.q_answer(tab_title, psec["techName"], pf["techName"],
-                                                                 f.get("depends_value") or "Tak"))
-                        g["field"]["validation"] = [v for v in g["field"]["validation"]] or []
+                        value = _option(pf, f.get("depends_value") or "Tak")
+                        if value is None:    # warunek nigdy by nie zaszedł - pole zostaje widoczne, ale nie wymagane
+                            g["field"]["validation"] = [v for v in g["field"]["validation"] if v != "REQUIRED"]
+                            continue
+                        g["field"]["states"] = b.show(b.q_answer(tab_t, psec["techName"], pf["techName"], value))
         if ti == len(subj_tabs) - 1 and atts:
             sections.append((b.section("Załączniki", [
                 b.field("FILE_UPLOADER", clean_title(a["label"]) or "Załącznik",
                         required=bool(a.get("required", False)))
                 for a in _dedupe(atts)], description=html("Dodaj wymagane dokumenty.")), []))
-        built_subject.append(b.tab(tab_title, [s for s, _ in sections]))
+        built_subject.append(b.tab(tab_t, [s for s, _ in sections]))
     if not any(t["questions"] for t in built_subject):
         b.tab("Informacje o wniosku", [b.section("Szczegóły wniosku", [
             b.field("TEXTAREA", "Treść wniosku")])])
@@ -448,6 +468,16 @@ def to_form_definition(generic: dict, tabs_mode: str = "auto") -> dict:
         description=html("Zanim przejdziesz do wyboru sposobu podpisu, sprawdź dane na podglądzie. "
                          "Jeśli zobaczysz błędy, wróć do edycji."))])], ttype="FINISH")
     return b.build()
+
+
+def _option(pf: dict, want: str) -> str | None:
+    """Nazwa opcji pola sterującego odpowiadająca wartości z VLM/reguł (JSONata porównuje tekst dokładnie)."""
+    names = [o["name"] for o in pf.get("options", [])]
+    exact = [n for n in names if norm(n).strip(" .") == norm(want).strip(" .")]
+    if exact:
+        return exact[0]
+    best = max(names, key=lambda n: SequenceMatcher(None, norm(n), norm(want)).ratio(), default=None)
+    return best if best and SequenceMatcher(None, norm(best), norm(want)).ratio() >= 0.8 else None
 
 
 def _dedupe_fields(fs: list[dict]) -> list[dict]:
